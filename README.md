@@ -1,4 +1,6 @@
-<img src="logo.png" width="380" alt="expLoRation">
+<p align="center">
+  <img src="logo.png" width="300" alt="expLoRation">
+</p>
 
 # expLoRation
 
@@ -29,7 +31,7 @@ pypubsub>=4.0
 ## Installation
 
 ```bash
-git clone https://github.com/jleake/expLoRation.git
+git clone https://github.com/joeyleake/expLoRation.git
 cd expLoRation
 pip install -r requirements.txt
 ```
