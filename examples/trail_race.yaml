@@ -1,0 +1,332 @@
+# expLoRation — Trail Race Director
+#
+# A self-contained race timing and competitor experience system for a
+# trail running event. The bot automatically greets runners at the start,
+# calls out splits at each checkpoint, warns stragglers of cutoff times,
+# and announces finishers to the crowd channel.
+#
+# Runners carry Meshtastic nodes. Race staff (marshals) carry nodes
+# flagged as "marshal" and are excluded from timing logic.
+#
+# Checkpoints are modeled as waypoints with near_waypoint triggers.
+# The finish line fires a unique per-runner finisher announcement.
+#
+# Replace coordinates with your actual course before use.
+
+channels:
+  - label: race_ops
+    name: RaceOps
+    psk: AQ==
+    monitor: true
+    participate: true
+
+  - label: spectators
+    name: Spectators
+    psk: AQ==
+    monitor: false
+    participate: true
+
+# ---------------------------------------------------------------------------
+# Waypoints — course checkpoints
+# ---------------------------------------------------------------------------
+waypoints:
+  - label: start_line
+    lat: 34.1500
+    lon: -84.4500
+
+  - label: checkpoint_1
+    lat: 34.1550
+    lon: -84.4450    # ~800m from start
+
+  - label: checkpoint_2
+    lat: 34.1610
+    lon: -84.4380    # ~1.8km from start
+
+  - label: checkpoint_3
+    lat: 34.1580
+    lon: -84.4290    # ~2.9km from start, turnaround area
+
+  - label: finish_line
+    lat: 34.1502
+    lon: -84.4498    # back near start
+
+# ---------------------------------------------------------------------------
+# Zones — start corral (rectangle split into two triangles)
+# ---------------------------------------------------------------------------
+zones:
+  - label: start_corral_a
+    points:
+      - [34.1510, -84.4510]
+      - [34.1490, -84.4510]
+      - [34.1490, -84.4490]
+
+  - label: start_corral_b
+    points:
+      - [34.1510, -84.4510]
+      - [34.1510, -84.4490]
+      - [34.1490, -84.4490]
+
+# ---------------------------------------------------------------------------
+# Nodes — race staff
+# ---------------------------------------------------------------------------
+nodes:
+  - label: race_director
+    node_id: "!deadbeef"
+    initial_flags:
+      - marshal
+      - director
+
+  - label: cp1_marshal
+    node_id: "!cafebabe"
+    initial_flags:
+      - marshal
+
+  - label: cp3_marshal
+    node_id: "!d00dfeed"
+    initial_flags:
+      - marshal
+
+# ---------------------------------------------------------------------------
+# Flags
+# ---------------------------------------------------------------------------
+flags:
+  - label: marshal
+  - label: director
+  - label: race_started
+  - label: passed_cp1
+  - label: passed_cp2
+  - label: passed_cp3
+  - label: still_racing    # set at CP1, cleared at finish — used to target cutoff warnings
+  - label: finished
+  - label: cutoff_warned
+
+# ---------------------------------------------------------------------------
+# Variables
+# ---------------------------------------------------------------------------
+variables:
+  - label: finisher_count
+    scope: global
+    tracks: flag_count
+    target: finished
+
+  - label: cp1_count
+    scope: global
+    tracks: waypoint_node_count
+    target: checkpoint_1
+    meters: 30
+
+  - label: dist_to_finish
+    scope: node
+    tracks: distance_to_waypoint
+    target: finish_line
+
+# ---------------------------------------------------------------------------
+# Messages
+# ---------------------------------------------------------------------------
+messages:
+  - label: race_start_announcement
+    text: "🏁 RACE STARTED — Good luck to all runners! Stay on the marked trail and have fun out there."
+
+  - label: runner_greeting
+    text: "👋 Welcome to the start line! The course is 5km out-and-back with three checkpoints. Stay on trail, stay safe. You've got this!"
+
+  - label: cp1_split
+    text: "✅ Checkpoint 1 — You're looking strong! Keep it up."
+
+  - label: cp2_split
+    text: "✅ Checkpoint 2 — Halfway there! Turnaround is just ahead."
+
+  - label: cp3_split
+    text: "↩️  Checkpoint 3 — Turnaround! Now head back the way you came. Finish line is {dist_to_finish}m away."
+
+  - label: finish_announcement_runner
+    text: "🎉 YOU FINISHED! Great run — head to the finish area to collect your medal."
+
+  - label: finish_announcement_public
+    text: "🎉 Another finisher crosses the line! Total finishers so far: {finisher_count}"
+
+  - label: cutoff_warning
+    text: "⚠️  CUTOFF WARNING — You're approaching the time cutoff. Pick up your pace or you may be pulled from the course."
+
+  - label: sweep_alert
+    text: "🧹 SWEEP ALERT — A runner has not yet reached CP2. Race director notified."
+
+# ---------------------------------------------------------------------------
+# Events
+# ---------------------------------------------------------------------------
+events:
+  # Auto-starts the race at the configured time
+  - label: race_start
+    trigger:
+      type: time_window
+      start: "2026-06-15T09:00:00"
+      end:   "2026-06-15T09:05:00"
+    responses:
+      - type: add_flag
+        flag_label: race_started
+        to_zone: start_corral_a
+      - type: send_message
+        message_label: race_start_announcement
+        to_channel: race_ops
+      - type: send_message
+        message_label: race_start_announcement
+        to_channel: spectators
+    max_triggers: 1
+
+  # Greet runners as they enter either half of the start corral
+  - label: greet_runner_a
+    trigger:
+      type: enters_zone
+      target: start_corral_a
+    trigger_per_node: true
+    responses:
+      - type: send_message
+        message_label: runner_greeting
+        to_triggering_node: true
+    exceptions:
+      - kind: node_has_flag
+        flag: marshal
+      - kind: node_has_flag
+        flag: finished
+    max_triggers: 1
+
+  - label: greet_runner_b
+    trigger:
+      type: enters_zone
+      target: start_corral_b
+    trigger_per_node: true
+    responses:
+      - type: send_message
+        message_label: runner_greeting
+        to_triggering_node: true
+    exceptions:
+      - kind: node_has_flag
+        flag: marshal
+      - kind: node_has_flag
+        flag: finished
+    max_triggers: 1
+
+  # Checkpoint 1 split — also sets still_racing for cutoff targeting
+  - label: split_cp1
+    trigger:
+      type: near_waypoint
+      target: checkpoint_1
+      meters: 25
+    trigger_per_node: true
+    responses:
+      - type: add_flag
+        flag_label: passed_cp1
+        to_triggering_node: true
+      - type: add_flag
+        flag_label: still_racing
+        to_triggering_node: true
+      - type: send_message
+        message_label: cp1_split
+        to_triggering_node: true
+    exceptions:
+      - kind: node_has_flag
+        flag: marshal
+      - kind: node_has_flag
+        flag: passed_cp1
+    max_triggers: 1
+
+  # Checkpoint 2 split
+  - label: split_cp2
+    trigger:
+      type: near_waypoint
+      target: checkpoint_2
+      meters: 25
+    trigger_per_node: true
+    responses:
+      - type: add_flag
+        flag_label: passed_cp2
+        to_triggering_node: true
+      - type: send_message
+        message_label: cp2_split
+        to_triggering_node: true
+    exceptions:
+      - kind: node_has_flag
+        flag: marshal
+      - kind: node_has_flag
+        flag: passed_cp2
+    max_triggers: 1
+
+  # Checkpoint 3 — turnaround
+  - label: split_cp3
+    trigger:
+      type: near_waypoint
+      target: checkpoint_3
+      meters: 25
+    trigger_per_node: true
+    responses:
+      - type: add_flag
+        flag_label: passed_cp3
+        to_triggering_node: true
+      - type: send_message
+        message_label: cp3_split
+        to_triggering_node: true
+    exceptions:
+      - kind: node_has_flag
+        flag: marshal
+      - kind: node_has_flag
+        flag: passed_cp3
+    max_triggers: 1
+
+  # Finish line — runner celebration + public announcement
+  - label: runner_finishes
+    trigger:
+      type: near_waypoint
+      target: finish_line
+      meters: 20
+    trigger_per_node: true
+    responses:
+      - type: add_flag
+        flag_label: finished
+        to_triggering_node: true
+      - type: remove_flag
+        flag_label: still_racing
+        to_triggering_node: true
+      - type: send_message
+        message_label: finish_announcement_runner
+        to_triggering_node: true
+      - type: send_message
+        message_label: finish_announcement_public
+        to_channel: spectators
+      - type: send_message
+        message_label: finish_announcement_public
+        to_channel: race_ops
+    exceptions:
+      - kind: node_has_flag
+        flag: marshal
+      - kind: node_has_flag
+        flag: finished
+      - kind: node_lacks_flag
+        flag: passed_cp3    # must have completed the full course
+
+  # Cutoff warning — sent to runners still on course 90 minutes in
+  - label: cutoff_warning_broadcast
+    trigger:
+      type: time_window
+      start: "2026-06-15T10:30:00"
+      end:   "2026-06-15T11:00:00"
+    responses:
+      - type: send_message
+        message_label: cutoff_warning
+        to_flag: still_racing   # runners who passed CP1 and haven't yet finished
+    max_triggers: 1
+
+  # Sweep alert — notify race director if any runner hasn't reached CP2 by 60 min
+  - label: sweep_trigger
+    trigger:
+      type: time_window
+      start: "2026-06-15T10:00:00"
+      end:   "2026-06-15T10:10:00"
+    responses:
+      - type: send_message
+        message_label: sweep_alert
+        to_node: race_director
+    exceptions:
+      - kind: zone_lacks_flag   # only alert if race is active
+        flag: race_started
+        target: start_corral_a
+    max_triggers: 1

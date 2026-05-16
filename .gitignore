@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.Python
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Runtime state — SQLite game databases contain live game state and should not be committed
+*.db
+*.db-shm
+*.db-wal
+
+# Secrets
+.env
+*.key
+*.pem
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+.claude/

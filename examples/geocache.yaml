@@ -1,0 +1,189 @@
+# expLoRation — example geocache game configuration
+#
+# Scenario: Players explore a park, find hidden waypoints, and collect clues.
+# Starting zone activates on game start. Players send "!hint" via DM to get
+# their first clue. Reaching the final waypoint awards the winner flag.
+#
+# Replace lat/lon values with real coordinates before running.
+
+channels:
+  - label: main
+    name: LongFast
+    psk: AQ==
+    monitor: true
+    participate: false
+
+zones:
+  - label: start_zone
+    # Triangle covering the park entrance area
+    points:
+      - [37.7749, -122.4194]
+      - [37.7752, -122.4188]
+      - [37.7745, -122.4185]
+
+  - label: clue_zone
+    # Triangle covering the middle section of the park
+    points:
+      - [37.7760, -122.4180]
+      - [37.7765, -122.4174]
+      - [37.7758, -122.4170]
+
+  - label: finish_zone
+    # Triangle covering the final destination
+    points:
+      - [37.7772, -122.4162]
+      - [37.7776, -122.4156]
+      - [37.7769, -122.4153]
+
+waypoints:
+  - label: hidden_cache
+    lat: 37.7773
+    lon: -122.4158
+
+nodes:
+  - label: game_master
+    node_id: "!deadbeef"
+    initial_flags:
+      - game_master
+
+messages:
+  - label: welcome
+    text: "Welcome to expLoRation! You're in the start zone. Send '!hint' for your first clue."
+
+  - label: hint_request
+    text: "!hint"
+
+  - label: first_clue
+    text: "Clue 1: Head north past the fountain. Look for something red near the big oak tree."
+
+  - label: near_cache
+    text: "You're close! The cache is hidden within 20 metres of your current position."
+
+  - label: winner_message
+    text: "Congratulations! You found the hidden cache and completed expLoRation!"
+
+  - label: already_won
+    text: "You've already found the cache — well done again! Spread the word."
+
+  - label: game_over
+    text: "The game window has closed. Thanks for playing expLoRation!"
+
+flags:
+  - label: game_master
+  - label: has_first_clue
+  - label: winner
+  - label: game_active
+
+events:
+  # -----------------------------------------------------------------------
+  # Timed: mark the game as active during the event window
+  # -----------------------------------------------------------------------
+  - label: game_start
+    trigger:
+      type: time_window
+      start: "2024-06-01T10:00:00"
+      end: "2024-06-01T17:00:00"
+    responses:
+      - type: add_flag
+        flag_label: game_active
+        to_zone: start_zone   # flags the zone itself, not the nodes
+    max_triggers: 1
+
+  # -----------------------------------------------------------------------
+  # Proximity: welcome any node that enters the start zone
+  # -----------------------------------------------------------------------
+  - label: enter_start_zone
+    trigger:
+      type: near_zone
+      target: start_zone
+      meters: 30
+    responses:
+      - type: send_message
+        message_label: welcome
+        to_triggering_node: true
+    exceptions:
+      - kind: node_has_flag
+        flag: winner
+      - kind: zone_lacks_flag
+        target: start_zone
+        flag: game_active
+    reset_mins: 30
+
+  # -----------------------------------------------------------------------
+  # Command: player in start zone sends "!hint" via DM
+  # -----------------------------------------------------------------------
+  - label: hint_command
+    trigger:
+      type: dm
+      message_label: hint_request
+      zone_label: start_zone
+    responses:
+      - type: send_message
+        message_label: first_clue
+        to_triggering_node: true
+      - type: add_flag
+        flag_label: has_first_clue
+        to_triggering_node: true
+    exceptions:
+      - kind: node_has_flag
+        flag: winner
+    max_triggers: null   # can respond to many players
+
+  # -----------------------------------------------------------------------
+  # Proximity: alert player when they're very close to the hidden cache
+  # -----------------------------------------------------------------------
+  - label: near_hidden_cache
+    trigger:
+      type: near_waypoint
+      target: hidden_cache
+      meters: 25
+    responses:
+      - type: send_message
+        message_label: near_cache
+        to_triggering_node: true
+    exceptions:
+      - kind: node_has_flag
+        flag: winner
+      - kind: node_lacks_flag
+        flag: has_first_clue
+    reset_mins: 10
+
+  # -----------------------------------------------------------------------
+  # Proximity: award winner flag when player reaches the finish zone
+  # -----------------------------------------------------------------------
+  - label: reach_finish
+    trigger:
+      type: near_waypoint
+      target: hidden_cache
+      meters: 5
+    responses:
+      - type: send_message
+        message_label: winner_message
+        to_triggering_node: true
+      - type: add_flag
+        flag_label: winner
+        to_triggering_node: true
+      - type: request_location
+        to_triggering_node: true
+    exceptions:
+      - kind: node_has_flag
+        flag: winner
+      - kind: node_lacks_flag
+        flag: has_first_clue
+
+  # -----------------------------------------------------------------------
+  # Repeat message for players who already won and come back
+  # -----------------------------------------------------------------------
+  - label: already_won_response
+    trigger:
+      type: near_waypoint
+      target: hidden_cache
+      meters: 5
+    responses:
+      - type: send_message
+        message_label: already_won
+        to_triggering_node: true
+    exceptions:
+      - kind: node_lacks_flag
+        flag: winner
+    reset_mins: 60
