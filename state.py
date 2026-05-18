@@ -75,9 +75,26 @@ CREATE TABLE IF NOT EXISTS mutable_variables (
     PRIMARY KEY (label, node_id)
 );
 
+CREATE TABLE IF NOT EXISTS dynamic_waypoints (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    lat        REAL NOT NULL,
+    lon        REAL NOT NULL,
+    created_at TEXT NOT NULL,
+    expires_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS dynamic_waypoint_flags (
+    waypoint_id INTEGER NOT NULL,
+    flag_label  TEXT NOT NULL,
+    set_at      TEXT NOT NULL,
+    expires_at  TEXT,
+    PRIMARY KEY (waypoint_id, flag_label)
+);
+
 CREATE INDEX IF NOT EXISTS idx_node_flags_label ON node_flags(flag_label);
 CREATE INDEX IF NOT EXISTS idx_node_locations_id ON node_locations(node_id);
 CREATE INDEX IF NOT EXISTS idx_mutable_variables_label ON mutable_variables(label);
+CREATE INDEX IF NOT EXISTS idx_dynamic_waypoint_flags_label ON dynamic_waypoint_flags(flag_label);
 """
 
 _FLAG_TABLE = {
@@ -439,3 +456,107 @@ class GameState:
                 (event_label, int(disabled)),
             )
             self._conn.commit()
+
+    # ------------------------------------------------------------------
+    # Dynamic waypoints
+    # ------------------------------------------------------------------
+
+    def create_dynamic_waypoint(self, lat: float, lon: float, expiry_mins: float | None = None) -> int:
+        with self._lock:
+            cur = self._conn.execute(
+                "INSERT INTO dynamic_waypoints(lat, lon, created_at, expires_at) VALUES(?, ?, ?, ?)",
+                (lat, lon, _now_iso(), _expires_iso(expiry_mins)),
+            )
+            self._conn.commit()
+            return cur.lastrowid
+
+    def add_dynamic_waypoint_flag(self, waypoint_id: int, flag_label: str, expiry_mins: float | None = None) -> None:
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO dynamic_waypoint_flags(waypoint_id, flag_label, set_at, expires_at)
+                VALUES(?, ?, ?, ?)
+                ON CONFLICT(waypoint_id, flag_label) DO UPDATE SET
+                    set_at=excluded.set_at, expires_at=excluded.expires_at
+                """,
+                (waypoint_id, flag_label, _now_iso(), _expires_iso(expiry_mins)),
+            )
+            self._conn.commit()
+
+    def remove_dynamic_waypoint_flag(self, waypoint_id: int, flag_label: str) -> None:
+        with self._lock:
+            self._conn.execute(
+                "DELETE FROM dynamic_waypoint_flags WHERE waypoint_id=? AND flag_label=?",
+                (waypoint_id, flag_label),
+            )
+            self._conn.commit()
+
+    def has_dynamic_waypoint_flag(self, waypoint_id: int, flag_label: str) -> bool:
+        now = _now_iso()
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT expires_at FROM dynamic_waypoint_flags WHERE waypoint_id=? AND flag_label=?",
+                (waypoint_id, flag_label),
+            ).fetchone()
+            if row is None:
+                return False
+            if row["expires_at"] is not None and row["expires_at"] <= now:
+                self._conn.execute(
+                    "DELETE FROM dynamic_waypoint_flags WHERE waypoint_id=? AND flag_label=?",
+                    (waypoint_id, flag_label),
+                )
+                self._conn.commit()
+                return False
+            return True
+
+    def get_dynamic_waypoints_with_flag(self, flag_label: str) -> list[tuple[int, float, float]]:
+        now = _now_iso()
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT dw.id, dw.lat, dw.lon
+                FROM dynamic_waypoints dw
+                JOIN dynamic_waypoint_flags dwf ON dwf.waypoint_id = dw.id
+                WHERE dwf.flag_label = ?
+                  AND (dw.expires_at IS NULL OR dw.expires_at > ?)
+                  AND (dwf.expires_at IS NULL OR dwf.expires_at > ?)
+                """,
+                (flag_label, now, now),
+            ).fetchall()
+            return [(r["id"], r["lat"], r["lon"]) for r in rows]
+
+    def destroy_dynamic_waypoint(self, waypoint_id: int) -> None:
+        with self._lock:
+            self._conn.execute(
+                "DELETE FROM dynamic_waypoint_flags WHERE waypoint_id=?", (waypoint_id,)
+            )
+            self._conn.execute(
+                "DELETE FROM dynamic_waypoints WHERE id=?", (waypoint_id,)
+            )
+            self._conn.commit()
+
+    def expire_dynamic_waypoints(self) -> None:
+        now = _now_iso()
+        with self._lock:
+            expired = self._conn.execute(
+                "SELECT id FROM dynamic_waypoints WHERE expires_at IS NOT NULL AND expires_at <= ?",
+                (now,),
+            ).fetchall()
+            for row in expired:
+                self._conn.execute(
+                    "DELETE FROM dynamic_waypoint_flags WHERE waypoint_id=?", (row["id"],)
+                )
+            self._conn.execute(
+                "DELETE FROM dynamic_waypoints WHERE expires_at IS NOT NULL AND expires_at <= ?",
+                (now,),
+            )
+            self._conn.commit()
+
+    def get_dynamic_waypoint_count(self) -> int:
+        now = _now_iso()
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COUNT(*) AS cnt FROM dynamic_waypoints WHERE expires_at IS NULL OR expires_at > ?",
+                (now,),
+            ).fetchone()
+            return row["cnt"] if row else 0

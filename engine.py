@@ -19,6 +19,8 @@ from config import (
     AddToGroupResponse, RemoveFromGroupResponse,
     SetVariableResponse, IncrementVariableResponse,
     RandomOptionsResponse,
+    CreateWaypointResponse, AddDynamicWaypointFlagResponse,
+    RemoveDynamicWaypointFlagResponse, DestroyWaypointResponse,
     TargetTriggeringNode, TargetNode, TargetZone, TargetFlag,
     TargetWaypointRadius, TargetAllInZone, TargetAllWithFlag,
     TargetAllNearWaypoint, TargetAllNearNode, TargetChannel, TargetGroup,
@@ -66,6 +68,7 @@ class NodeContext:
     node_id: str
     entered_zones: frozenset[str] = field(default_factory=frozenset)
     left_zones: frozenset[str] = field(default_factory=frozenset)
+    triggering_waypoint_id: int | None = None
 
 
 @dataclass
@@ -127,6 +130,7 @@ class Engine:
     def handle_position(self, node_id: str, lat: float, lon: float) -> None:
         self.state.update_node_location(node_id, lat, lon)
         self.state.expire_flags()
+        self.state.expire_dynamic_waypoints()
 
         prev_zones = self._node_zones.get(node_id, frozenset())
         curr_zones = frozenset(
@@ -155,6 +159,7 @@ class Engine:
         self, node_id: str, text: str, is_dm: bool, channel_idx: int
     ) -> None:
         self.state.expire_flags()
+        self.state.expire_dynamic_waypoints()
         ctx = MessageContext(node_id, text, is_dm, channel_idx)
         for event in self.config.events:
             if isinstance(event.trigger, CommandTrigger):
@@ -163,6 +168,7 @@ class Engine:
 
     def handle_periodic(self) -> None:
         self.state.expire_flags()
+        self.state.expire_dynamic_waypoints()
         ctx = PeriodicContext()
         for event in self.config.events:
             if isinstance(event.trigger, TimedTrigger):
@@ -227,13 +233,25 @@ class Engine:
             if t.kind == "near_waypoint":
                 if not isinstance(ctx, NodeContext):
                     return False
-                waypoint = self._get_waypoint(t.target_label)
-                if waypoint is None:
-                    return False
                 node_loc = located.get(ctx.node_id)
                 if node_loc is None:
                     return False
-                return geo.haversine(*node_loc, waypoint.lat, waypoint.lon) <= t.meters
+                if t.target_label:
+                    waypoint = self._get_waypoint(t.target_label)
+                    if waypoint is None:
+                        return False
+                    return geo.haversine(*node_loc, waypoint.lat, waypoint.lon) <= t.meters
+                else:
+                    candidates = self.state.get_dynamic_waypoints_with_flag(t.target_flag)
+                    in_range = [
+                        (geo.haversine(*node_loc, lat, lon), wp_id)
+                        for wp_id, lat, lon in candidates
+                        if geo.haversine(*node_loc, lat, lon) <= t.meters
+                    ]
+                    if not in_range:
+                        return False
+                    ctx.triggering_waypoint_id = min(in_range)[1]
+                    return True
 
             if t.kind == "near_zone":
                 if not isinstance(ctx, NodeContext):
@@ -357,15 +375,15 @@ class Engine:
         for exc in event.exceptions:
             if exc.kind == "random_skip":
                 continue
-            if self._exception_matches(exc, node_id):
+            if self._exception_matches(exc, node_id, ctx):
                 return True
         # Roll random_skip only if all deterministic exceptions passed
         for exc in event.exceptions:
-            if exc.kind == "random_skip" and self._exception_matches(exc, node_id):
+            if exc.kind == "random_skip" and self._exception_matches(exc, node_id, ctx):
                 return True
         return False
 
-    def _exception_matches(self, exc: EventException, node_id: str | None) -> bool:
+    def _exception_matches(self, exc: EventException, node_id: str | None, ctx: Context) -> bool:
         kind = exc.kind
         if kind == "random_skip":
             return random.random() < (exc.chance or 0.0)
@@ -380,9 +398,13 @@ class Engine:
             has = self.state.has_flag("zone", exc.target, exc.flag)
             return has if kind == "zone_has_flag" else not has
         if kind in ("waypoint_has_flag", "waypoint_lacks_flag"):
-            if exc.target is None:
-                return False
-            has = self.state.has_flag("waypoint", exc.target, exc.flag)
+            if exc.target is not None:
+                has = self.state.has_flag("waypoint", exc.target, exc.flag)
+            else:
+                wp_id = ctx.triggering_waypoint_id if isinstance(ctx, NodeContext) else None
+                if wp_id is None:
+                    return False
+                has = self.state.has_dynamic_waypoint_flag(wp_id, exc.flag)
             return has if kind == "waypoint_has_flag" else not has
         if kind in ("node_in_group", "node_not_in_group"):
             if node_id is None or exc.group is None:
@@ -525,6 +547,45 @@ class Engine:
                     self._execute_response(nested_resp, ctx)
                 except Exception:
                     log.exception("Error executing response in random_options branch")
+
+        elif isinstance(resp, CreateWaypointResponse):
+            loc = self.state.get_node_location(node_id) if node_id else None
+            if loc is None:
+                log.warning("create_waypoint: no location for node %s; skipping", node_id)
+                return
+            lat, lon = loc
+            flag_map = {f.label: f for f in self.config.flags}
+            wp_id = self.state.create_dynamic_waypoint(lat, lon, resp.expiry_mins)
+            for flag_label in resp.initial_flags:
+                expiry = flag_map[flag_label].expiry_mins if flag_label in flag_map else None
+                self.state.add_dynamic_waypoint_flag(wp_id, flag_label, expiry)
+            log.info("Created dynamic waypoint %d at %.5f,%.5f flags=%s", wp_id, lat, lon, resp.initial_flags)
+
+        elif isinstance(resp, AddDynamicWaypointFlagResponse):
+            wp_id = ctx.triggering_waypoint_id if isinstance(ctx, NodeContext) else None
+            if wp_id is None:
+                log.warning("add_waypoint_flag: no triggering waypoint in context; skipping")
+                return
+            flag_map = {f.label: f for f in self.config.flags}
+            expiry = flag_map[resp.flag_label].expiry_mins if resp.flag_label in flag_map else None
+            self.state.add_dynamic_waypoint_flag(wp_id, resp.flag_label, expiry)
+            log.info("Added flag %r to dynamic waypoint %d", resp.flag_label, wp_id)
+
+        elif isinstance(resp, RemoveDynamicWaypointFlagResponse):
+            wp_id = ctx.triggering_waypoint_id if isinstance(ctx, NodeContext) else None
+            if wp_id is None:
+                log.warning("remove_waypoint_flag: no triggering waypoint in context; skipping")
+                return
+            self.state.remove_dynamic_waypoint_flag(wp_id, resp.flag_label)
+            log.info("Removed flag %r from dynamic waypoint %d", resp.flag_label, wp_id)
+
+        elif isinstance(resp, DestroyWaypointResponse):
+            wp_id = ctx.triggering_waypoint_id if isinstance(ctx, NodeContext) else None
+            if wp_id is None:
+                log.warning("destroy_waypoint: no triggering waypoint in context; skipping")
+                return
+            self.state.destroy_dynamic_waypoint(wp_id)
+            log.info("Destroyed dynamic waypoint %d", wp_id)
 
     # ------------------------------------------------------------------
     # Target resolution
