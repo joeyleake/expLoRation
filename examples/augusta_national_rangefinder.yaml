@@ -1,0 +1,470 @@
+# expLoRation — Augusta National green ranges
+
+channels:
+  - label: golf
+    name: GolfDist
+    psk: AQ==
+    monitor: true
+    participate: true
+
+messages:
+
+  - label: help
+    text: "!help"
+
+  - label: h1
+    text: "!1"
+
+  - label: h2
+    text: "!2"
+
+  - label: h3
+    text: "!3"
+
+  - label: h4
+    text: "!4"
+
+  - label: h5
+    text: "!5"
+
+  - label: h6
+    text: "!6"
+
+  - label: h7
+    text: "!7"
+
+  - label: h8
+    text: "!8"
+
+  - label: h9
+    text: "!9"
+
+  - label: h10
+    text: "!10"
+
+  - label: h11
+    text: "!11"
+
+  - label: h12
+    text: "!12"
+
+  - label: h13
+    text: "!13"
+
+  - label: h14
+    text: "!14"
+
+  - label: h15
+    text: "!15"
+
+  - label: h16
+    text: "!16"
+
+  - label: h17
+    text: "!17"
+
+  - label: h18
+    text: "!18"
+
+  - label: help_message
+    text: |
+      ⛳ Augusta National ⛳
+
+      !1  through !18
+        Distance to each green.
+
+      Example:
+        !12
+
+      Returns your distance to the 12th green.
+
+  - label: hole1
+    text: "⛳#1 Distance: {dist_to_hole1}m"
+
+  - label: hole2
+    text: "⛳#2 Distance: {dist_to_hole2}m"
+
+  - label: hole3
+    text: "⛳#3 Distance: {dist_to_hole3}m"
+
+  - label: hole4
+    text: "⛳#4 Distance: {dist_to_hole4}m"
+
+  - label: hole5
+    text: "⛳#5 Distance: {dist_to_hole5}m"
+
+  - label: hole6
+    text: "⛳#6 Distance: {dist_to_hole6}m"
+
+  - label: hole7
+    text: "⛳#7 Distance: {dist_to_hole7}m"
+
+  - label: hole8
+    text: "⛳#8 Distance: {dist_to_hole8}m"
+
+  - label: hole9
+    text: "⛳#9 Distance: {dist_to_hole9}m"
+
+  - label: hole10
+    text: "⛳#10 Distance: {dist_to_hole10}m"
+
+  - label: hole11
+    text: "⛳#11 Distance: {dist_to_hole11}m"
+
+  - label: hole12
+    text: "⛳#12 Distance: {dist_to_hole12}m"
+
+  - label: hole13
+    text: "⛳#13 Distance: {dist_to_hole13}m"
+
+  - label: hole14
+    text: "⛳#14 Distance: {dist_to_hole14}m"
+
+  - label: hole15
+    text: "⛳#15 Distance: {dist_to_hole15}m"
+
+  - label: hole16
+    text: "⛳#16 Distance: {dist_to_hole16}m"
+
+  - label: hole17
+    text: "⛳#17 Distance: {dist_to_hole17}m"
+
+  - label: hole18
+    text: "⛳#18 Distance: {dist_to_hole18}m"
+
+waypoints:
+  - label: augusta_1_green
+    lat: 33.503548
+    lon: -82.020875
+
+  - label: augusta_2_green
+    lat: 33.504256
+    lon: -82.019412
+
+  - label: augusta_3_green
+    lat: 33.504919
+    lon: -82.018235
+
+  - label: augusta_4_green
+    lat: 33.505901
+    lon: -82.017988
+
+  - label: augusta_5_green
+    lat: 33.506612
+    lon: -82.019104
+
+  - label: augusta_6_green
+    lat: 33.507178
+    lon: -82.020611
+
+  - label: augusta_7_green
+    lat: 33.507981
+    lon: -82.021847
+
+  - label: augusta_8_green
+    lat: 33.508742
+    lon: -82.023102
+
+  - label: augusta_9_green
+    lat: 33.509611
+    lon: -82.022417
+
+  - label: augusta_10_green
+    lat: 33.510208
+    lon: -82.021211
+
+  - label: augusta_11_green
+    lat: 33.510814
+    lon: -82.019968
+
+  - label: augusta_12_green
+    lat: 33.511455
+    lon: -82.018799
+
+  - label: augusta_13_green
+    lat: 33.512137
+    lon: -82.017422
+
+  - label: augusta_14_green
+    lat: 33.512748
+    lon: -82.016244
+
+  - label: augusta_15_green
+    lat: 33.513402
+    lon: -82.015037
+
+  - label: augusta_16_green
+    lat: 33.514198
+    lon: -82.014211
+
+  - label: augusta_17_green
+    lat: 33.514872
+    lon: -82.013033
+
+  - label: augusta_18_green
+    lat: 33.515611
+    lon: -82.011877
+
+variables:
+  - label: dist_to_hole1
+    scope: node
+    tracks: distance_to_waypoint
+    target: augusta_1_green
+
+  - label: dist_to_hole2
+    scope: node
+    tracks: distance_to_waypoint
+    target: augusta_2_green
+
+  - label: dist_to_hole3
+    scope: node
+    tracks: distance_to_waypoint
+    target: augusta_3_green
+
+  - label: dist_to_hole4
+    scope: node
+    tracks: distance_to_waypoint
+    target: augusta_4_green
+
+  - label: dist_to_hole5
+    scope: node
+    tracks: distance_to_waypoint
+    target: augusta_5_green
+
+  - label: dist_to_hole6
+    scope: node
+    tracks: distance_to_waypoint
+    target: augusta_6_green
+
+  - label: dist_to_hole7
+    scope: node
+    tracks: distance_to_waypoint
+    target: augusta_7_green
+
+  - label: dist_to_hole8
+    scope: node
+    tracks: distance_to_waypoint
+    target: augusta_8_green
+
+  - label: dist_to_hole9
+    scope: node
+    tracks: distance_to_waypoint
+    target: augusta_9_green
+
+  - label: dist_to_hole10
+    scope: node
+    tracks: distance_to_waypoint
+    target: augusta_10_green
+
+  - label: dist_to_hole11
+    scope: node
+    tracks: distance_to_waypoint
+    target: augusta_11_green
+
+  - label: dist_to_hole12
+    scope: node
+    tracks: distance_to_waypoint
+    target: augusta_12_green
+
+  - label: dist_to_hole13
+    scope: node
+    tracks: distance_to_waypoint
+    target: augusta_13_green
+
+  - label: dist_to_hole14
+    scope: node
+    tracks: distance_to_waypoint
+    target: augusta_14_green
+
+  - label: dist_to_hole15
+    scope: node
+    tracks: distance_to_waypoint
+    target: augusta_15_green
+
+  - label: dist_to_hole16
+    scope: node
+    tracks: distance_to_waypoint
+    target: augusta_16_green
+
+  - label: dist_to_hole17
+    scope: node
+    tracks: distance_to_waypoint
+    target: augusta_17_green
+
+  - label: dist_to_hole18
+    scope: node
+    tracks: distance_to_waypoint
+    target: augusta_18_green
+
+events:
+
+  - label: golf_help
+    trigger:
+      type: dm
+      message_label: help
+    responses:
+      - type: send_message
+        message_label: help_message
+        to_triggering_node: true
+
+  - label: hole_1_distance
+    trigger:
+      type: dm
+      message_label: h1
+    responses:
+      - type: send_message
+        message_label: hole1
+        to_triggering_node: true
+
+  - label: hole_2_distance
+    trigger:
+      type: dm
+      message_label: h2
+    responses:
+      - type: send_message
+        message_label: hole2
+        to_triggering_node: true
+
+  - label: hole_3_distance
+    trigger:
+      type: dm
+      message_label: h3
+    responses:
+      - type: send_message
+        message_label: hole3
+        to_triggering_node: true
+
+  - label: hole_4_distance
+    trigger:
+      type: dm
+      message_label: h4
+    responses:
+      - type: send_message
+        message_label: hole4
+        to_triggering_node: true
+
+  - label: hole_5_distance
+    trigger:
+      type: dm
+      message_label: h5
+    responses:
+      - type: send_message
+        message_label: hole5
+        to_triggering_node: true
+
+  - label: hole_6_distance
+    trigger:
+      type: dm
+      message_label: h6
+    responses:
+      - type: send_message
+        message_label: hole6
+        to_triggering_node: true
+
+  - label: hole_7_distance
+    trigger:
+      type: dm
+      message_label: h7
+    responses:
+      - type: send_message
+        message_label: hole7
+        to_triggering_node: true
+
+  - label: hole_8_distance
+    trigger:
+      type: dm
+      message_label: h8
+    responses:
+      - type: send_message
+        message_label: hole8
+        to_triggering_node: true
+
+  - label: hole_9_distance
+    trigger:
+      type: dm
+      message_label: h9
+    responses:
+      - type: send_message
+        message_label: hole9
+        to_triggering_node: true
+
+  - label: hole_10_distance
+    trigger:
+      type: dm
+      message_label: h10
+    responses:
+      - type: send_message
+        message_label: hole10
+        to_triggering_node: true
+
+  - label: hole_11_distance
+    trigger:
+      type: dm
+      message_label: h11
+    responses:
+      - type: send_message
+        message_label: hole11
+        to_triggering_node: true
+
+  - label: hole_12_distance
+    trigger:
+      type: dm
+      message_label: h12
+    responses:
+      - type: send_message
+        message_label: hole12
+        to_triggering_node: true
+
+  - label: hole_13_distance
+    trigger:
+      type: dm
+      message_label: h13
+    responses:
+      - type: send_message
+        message_label: hole13
+        to_triggering_node: true
+
+  - label: hole_14_distance
+    trigger:
+      type: dm
+      message_label: h14
+    responses:
+      - type: send_message
+        message_label: hole14
+        to_triggering_node: true
+
+  - label: hole_15_distance
+    trigger:
+      type: dm
+      message_label: h15
+    responses:
+      - type: send_message
+        message_label: hole15
+        to_triggering_node: true
+
+  - label: hole_16_distance
+    trigger:
+      type: dm
+      message_label: h16
+    responses:
+      - type: send_message
+        message_label: hole16
+        to_triggering_node: true
+
+  - label: hole_17_distance
+    trigger:
+      type: dm
+      message_label: h17
+    responses:
+      - type: send_message
+        message_label: hole17
+        to_triggering_node: true
+
+  - label: hole_18_distance
+    trigger:
+      type: dm
+      message_label: h18
+    responses:
+      - type: send_message
+        message_label: hole18
+        to_triggering_node: true
