@@ -13,6 +13,7 @@ from typing import Any
 from config import (
     GameConfig, Event, Variable, MutableVariableDef,
     ProximityTrigger, TimedTrigger, CommandTrigger, VariableThresholdTrigger,
+    FlagExpiryTrigger, WaypointExpiryTrigger,
     SendMessageResponse, AddFlagResponse, RemoveFlagResponse,
     RequestLocationResponse, SetEventTriggersResponse,
     DisableEventResponse, EnableEventResponse,
@@ -84,7 +85,23 @@ class PeriodicContext:
     pass
 
 
-Context = NodeContext | MessageContext | PeriodicContext
+@dataclass
+class ExpiryContext:
+    target_kind: str           # "node" | "zone" | "waypoint" | "dynamic_waypoint"
+    target: str | int          # entity identifier (node_id, zone_label, waypoint_label, or wp int id)
+    flag_label: str | None     # flag that expired; None for waypoint_expired events
+    waypoint_flags: frozenset = field(default_factory=frozenset)  # flags waypoint had at expiry
+
+    @property
+    def node_id(self) -> str | None:
+        return self.target if self.target_kind == "node" else None  # type: ignore[return-value]
+
+    @property
+    def triggering_waypoint_id(self) -> int | None:
+        return self.target if self.target_kind == "dynamic_waypoint" else None  # type: ignore[return-value]
+
+
+Context = NodeContext | MessageContext | PeriodicContext | ExpiryContext
 
 
 # ---------------------------------------------------------------------------
@@ -129,8 +146,10 @@ class Engine:
 
     def handle_position(self, node_id: str, lat: float, lon: float) -> None:
         self.state.update_node_location(node_id, lat, lon)
-        self.state.expire_flags()
-        self.state.expire_dynamic_waypoints()
+        expired_flags = self.state.expire_flags()
+        expired_dynamic_flags = self.state.expire_dynamic_waypoint_flags()
+        expired_waypoints = self.state.expire_dynamic_waypoints()
+        self._dispatch_expiry_events(expired_flags, expired_dynamic_flags, expired_waypoints)
 
         prev_zones = self._node_zones.get(node_id, frozenset())
         curr_zones = frozenset(
@@ -158,8 +177,10 @@ class Engine:
     def handle_message(
         self, node_id: str, text: str, is_dm: bool, channel_idx: int
     ) -> None:
-        self.state.expire_flags()
-        self.state.expire_dynamic_waypoints()
+        expired_flags = self.state.expire_flags()
+        expired_dynamic_flags = self.state.expire_dynamic_waypoint_flags()
+        expired_waypoints = self.state.expire_dynamic_waypoints()
+        self._dispatch_expiry_events(expired_flags, expired_dynamic_flags, expired_waypoints)
         ctx = MessageContext(node_id, text, is_dm, channel_idx)
         for event in self.config.events:
             if isinstance(event.trigger, CommandTrigger):
@@ -167,8 +188,10 @@ class Engine:
                     self._fire_event(event, ctx)
 
     def handle_periodic(self) -> None:
-        self.state.expire_flags()
-        self.state.expire_dynamic_waypoints()
+        expired_flags = self.state.expire_flags()
+        expired_dynamic_flags = self.state.expire_dynamic_waypoint_flags()
+        expired_waypoints = self.state.expire_dynamic_waypoints()
+        self._dispatch_expiry_events(expired_flags, expired_dynamic_flags, expired_waypoints)
         ctx = PeriodicContext()
         for event in self.config.events:
             if isinstance(event.trigger, TimedTrigger):
@@ -199,7 +222,7 @@ class Engine:
         if self.state.is_event_disabled(event.label):
             return False
 
-        node_id = ctx.node_id if isinstance(ctx, (NodeContext, MessageContext)) else None
+        node_id = ctx.node_id if isinstance(ctx, (NodeContext, MessageContext, ExpiryContext)) else None
         if event.trigger_per_node and node_id is not None:
             times, last = self.state.get_node_event_state(event.label, node_id)
         else:
@@ -357,6 +380,20 @@ class Engine:
                 raw = var_def.initial
             return self._evaluate_threshold(raw, t.operator, t.value)
 
+        elif isinstance(t, FlagExpiryTrigger):
+            if not isinstance(ctx, ExpiryContext):
+                return False
+            return ctx.flag_label == t.flag_label and ctx.target_kind == t.target_kind
+
+        elif isinstance(t, WaypointExpiryTrigger):
+            if not isinstance(ctx, ExpiryContext):
+                return False
+            if ctx.flag_label is not None:  # flag_expired context, not waypoint_expired
+                return False
+            if t.had_flag is not None and t.had_flag not in ctx.waypoint_flags:
+                return False
+            return True
+
         return False
 
     @staticmethod
@@ -370,7 +407,7 @@ class Engine:
         return fn(current, threshold) if fn else False
 
     def _check_exceptions(self, event: Event, ctx: Context) -> bool:
-        node_id = ctx.node_id if isinstance(ctx, (NodeContext, MessageContext)) else None
+        node_id = ctx.node_id if isinstance(ctx, (NodeContext, MessageContext, ExpiryContext)) else None
         # Evaluate deterministic exceptions first
         for exc in event.exceptions:
             if exc.kind == "random_skip":
@@ -401,7 +438,7 @@ class Engine:
             if exc.target is not None:
                 has = self.state.has_flag("waypoint", exc.target, exc.flag)
             else:
-                wp_id = ctx.triggering_waypoint_id if isinstance(ctx, NodeContext) else None
+                wp_id = ctx.triggering_waypoint_id if isinstance(ctx, (NodeContext, ExpiryContext)) else None
                 if wp_id is None:
                     return False
                 has = self.state.has_dynamic_waypoint_flag(wp_id, exc.flag)
@@ -422,6 +459,39 @@ class Engine:
             result = self.state.is_in_group(exc.group, exc.target)
             return result if kind == "waypoint_in_group" else not result
         return False
+
+    def _dispatch_expiry_events(
+        self,
+        expired_flags: list[tuple[str, str, str]],
+        expired_dynamic_flags: list[tuple[int, str]],
+        expired_waypoints: list[tuple[int, frozenset]],
+    ) -> None:
+        for kind, entity_id, flag_label in expired_flags:
+            ctx = ExpiryContext(target_kind=kind, target=entity_id, flag_label=flag_label)
+            for event in self.config.events:
+                if isinstance(event.trigger, FlagExpiryTrigger):
+                    if self._should_fire(event, ctx):
+                        self._fire_event(event, ctx)
+
+        for wp_id, flag_label in expired_dynamic_flags:
+            ctx = ExpiryContext(target_kind="dynamic_waypoint", target=wp_id, flag_label=flag_label)
+            for event in self.config.events:
+                if isinstance(event.trigger, FlagExpiryTrigger):
+                    if self._should_fire(event, ctx):
+                        self._fire_event(event, ctx)
+
+        for wp_id, flags in expired_waypoints:
+            # flag_label=None signals waypoint_expired (not individual flag expiry)
+            ctx = ExpiryContext(
+                target_kind="dynamic_waypoint",
+                target=wp_id,
+                flag_label=None,
+                waypoint_flags=flags,
+            )
+            for event in self.config.events:
+                if isinstance(event.trigger, WaypointExpiryTrigger):
+                    if self._should_fire(event, ctx):
+                        self._fire_event(event, ctx)
 
     # ------------------------------------------------------------------
     # Response execution
@@ -452,12 +522,12 @@ class Engine:
             except Exception:
                 log.exception("Error executing response in event %r", event.label)
         self.state.increment_event_triggers(event.label)
-        node_id = ctx.node_id if isinstance(ctx, (NodeContext, MessageContext)) else None
+        node_id = ctx.node_id if isinstance(ctx, (NodeContext, MessageContext, ExpiryContext)) else None
         if event.trigger_per_node and node_id is not None:
             self.state.increment_node_event_triggers(event.label, node_id)
 
     def _execute_response(self, resp, ctx: Context) -> None:
-        node_id = ctx.node_id if isinstance(ctx, (NodeContext, MessageContext)) else None
+        node_id = ctx.node_id if isinstance(ctx, (NodeContext, MessageContext, ExpiryContext)) else None
 
         if isinstance(resp, SendMessageResponse):
             message = self._get_message(resp.message_label)

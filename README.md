@@ -146,6 +146,7 @@ The [examples/](examples/) directory contains four ready-to-adapt scenarios:
 | [`ghost_walk.yaml`](examples/ghost_walk.yaml) | Self-guided ghost tour — visitors receive atmospheric story fragments as they approach five points of interest; collecting all five unlocks a final revelation |
 | [`trail_race.yaml`](examples/trail_race.yaml) | Trail race director — automatic checkpoint splits, finish line announcements, cutoff warnings, and sweep alerts for a 5km out-and-back course |
 | [`castle_defense.yaml`](examples/castle_defense.yaml) | Zone-based security monitoring — three escalating alert tiers fire as unknown nodes approach a defended position, with a daily status report |
+| [`augusta_national_rangefinder.yaml`](examples/augusta_national_rangefinder.yaml) | Golf rangefinder — players DM the hole number and receive their distance to that green using live GPS |
 
 All example files use placeholder coordinates and fictional node IDs. Replace them with your
 actual values before running.

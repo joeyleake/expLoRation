@@ -266,15 +266,50 @@ class GameState:
             ).fetchall()
             return [r["node_id"] for r in rows]
 
-    def expire_flags(self) -> None:
+    def expire_flags(self) -> list[tuple[str, str, str]]:
+        """Delete expired static flags. Returns [(kind, entity_id, flag_label), ...]."""
         now = _now_iso()
+        expired: list[tuple[str, str, str]] = []
         with self._lock:
-            for table in ("node_flags", "zone_flags", "waypoint_flags"):
+            for table, kind, col in (
+                ("node_flags",     "node",     "node_id"),
+                ("zone_flags",     "zone",     "zone_label"),
+                ("waypoint_flags", "waypoint", "waypoint_label"),
+            ):
+                rows = self._conn.execute(
+                    f"SELECT {col}, flag_label FROM {table} "
+                    f"WHERE expires_at IS NOT NULL AND expires_at <= ?",
+                    (now,),
+                ).fetchall()
+                if rows:
+                    self._conn.execute(
+                        f"DELETE FROM {table} WHERE expires_at IS NOT NULL AND expires_at <= ?",
+                        (now,),
+                    )
+                    expired.extend((kind, row[0], row[1]) for row in rows)
+            self._conn.commit()
+        return expired
+
+    def expire_dynamic_waypoint_flags(self) -> list[tuple[int, str]]:
+        """Delete expired flags on live dynamic waypoints.
+        Returns [(waypoint_id, flag_label), ...]. Does not touch the waypoints themselves."""
+        now = _now_iso()
+        expired: list[tuple[int, str]] = []
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT waypoint_id, flag_label FROM dynamic_waypoint_flags "
+                "WHERE expires_at IS NOT NULL AND expires_at <= ?",
+                (now,),
+            ).fetchall()
+            if rows:
                 self._conn.execute(
-                    f"DELETE FROM {table} WHERE expires_at IS NOT NULL AND expires_at <= ?",
+                    "DELETE FROM dynamic_waypoint_flags "
+                    "WHERE expires_at IS NOT NULL AND expires_at <= ?",
                     (now,),
                 )
-            self._conn.commit()
+                expired.extend((row[0], row[1]) for row in rows)
+                self._conn.commit()
+        return expired
 
     # ------------------------------------------------------------------
     # Mutable variables
@@ -535,22 +570,33 @@ class GameState:
             )
             self._conn.commit()
 
-    def expire_dynamic_waypoints(self) -> None:
+    def expire_dynamic_waypoints(self) -> list[tuple[int, frozenset[str]]]:
+        """Delete expired dynamic waypoints and their flags.
+        Returns [(waypoint_id, frozenset_of_flag_labels), ...] per deleted waypoint.
+        Flag labels are captured before deletion for had_flag trigger filtering only —
+        no flag_expired events fire for cascade-deleted flags."""
         now = _now_iso()
+        expired: list[tuple[int, frozenset[str]]] = []
         with self._lock:
-            expired = self._conn.execute(
+            rows = self._conn.execute(
                 "SELECT id FROM dynamic_waypoints WHERE expires_at IS NOT NULL AND expires_at <= ?",
                 (now,),
             ).fetchall()
-            for row in expired:
+            for row in rows:
+                wp_id = row["id"]
+                flag_rows = self._conn.execute(
+                    "SELECT flag_label FROM dynamic_waypoint_flags WHERE waypoint_id=?",
+                    (wp_id,),
+                ).fetchall()
+                flags = frozenset(r["flag_label"] for r in flag_rows)
                 self._conn.execute(
-                    "DELETE FROM dynamic_waypoint_flags WHERE waypoint_id=?", (row["id"],)
-                )
-            self._conn.execute(
-                "DELETE FROM dynamic_waypoints WHERE expires_at IS NOT NULL AND expires_at <= ?",
-                (now,),
-            )
-            self._conn.commit()
+                    "DELETE FROM dynamic_waypoint_flags WHERE waypoint_id=?", (wp_id,))
+                self._conn.execute(
+                    "DELETE FROM dynamic_waypoints WHERE id=?", (wp_id,))
+                expired.append((wp_id, flags))
+            if expired:
+                self._conn.commit()
+        return expired
 
     def get_dynamic_waypoint_count(self) -> int:
         now = _now_iso()
