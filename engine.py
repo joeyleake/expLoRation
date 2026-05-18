@@ -16,10 +16,11 @@ from config import (
     SendMessageResponse, AddFlagResponse, RemoveFlagResponse,
     RequestLocationResponse, SetEventTriggersResponse,
     DisableEventResponse, EnableEventResponse,
+    AddToGroupResponse, RemoveFromGroupResponse,
     RandomOptionsResponse,
     TargetTriggeringNode, TargetNode, TargetZone, TargetFlag,
     TargetWaypointRadius, TargetAllInZone, TargetAllWithFlag,
-    TargetAllNearWaypoint, TargetAllNearNode, TargetChannel,
+    TargetAllNearWaypoint, TargetAllNearNode, TargetChannel, TargetGroup,
     EventException,
 )
 from state import GameState
@@ -92,6 +93,7 @@ class Engine:
         self.state = state
         self.interface = interface
         self.send_delay = send_delay
+        self._group_kind: dict[str, str] = {g.label: g.kind for g in config.groups}
 
         # populated by bot.py on connection
         self.channel_index_map: dict[str, int] = {}   # channel_label → device index
@@ -338,6 +340,21 @@ class Engine:
                 return False
             has = self.state.has_flag("waypoint", exc.target, exc.flag)
             return has if kind == "waypoint_has_flag" else not has
+        if kind in ("node_in_group", "node_not_in_group"):
+            if node_id is None or exc.group is None:
+                return False
+            result = self.state.is_in_group(exc.group, node_id)
+            return result if kind == "node_in_group" else not result
+        if kind in ("zone_in_group", "zone_not_in_group"):
+            if exc.target is None or exc.group is None:
+                return False
+            result = self.state.is_in_group(exc.group, exc.target)
+            return result if kind == "zone_in_group" else not result
+        if kind in ("waypoint_in_group", "waypoint_not_in_group"):
+            if exc.target is None or exc.group is None:
+                return False
+            result = self.state.is_in_group(exc.group, exc.target)
+            return result if kind == "waypoint_in_group" else not result
         return False
 
     # ------------------------------------------------------------------
@@ -418,6 +435,23 @@ class Engine:
             self.state.set_event_disabled(resp.event_label, False)
             log.info("Enabled event %r", resp.event_label)
 
+        elif isinstance(resp, (AddToGroupResponse, RemoveFromGroupResponse)):
+            adding = isinstance(resp, AddToGroupResponse)
+            op = "add_to_group" if adding else "remove_from_group"
+            kind = self._group_kind.get(resp.group_label, "node")
+            if kind == "node":
+                members = self._resolve_node_targets(resp.target, node_id)
+            elif kind == "zone":
+                members = [resp.target.zone_label] if isinstance(resp.target, TargetZone) else []
+            else:  # waypoint
+                members = [resp.target.waypoint_label] if hasattr(resp.target, "waypoint_label") else []
+            for member in members:
+                if adding:
+                    self.state.add_to_group(resp.group_label, member)
+                else:
+                    self.state.remove_from_group(resp.group_label, member)
+                log.info("%s %s → %s", op, resp.group_label, member)
+
         elif isinstance(resp, RandomOptionsResponse):
             weights = [opt.weight for opt in resp.options]
             chosen = random.choices(resp.options, weights=weights, k=1)[0]
@@ -461,6 +495,10 @@ class Engine:
                 return []
             return geo.nodes_near_node(node_def.node_id, target.meters, located)
 
+        if isinstance(target, TargetGroup):
+            # Only valid for node-kind groups
+            return self.state.get_group_members(target.group_label)
+
         return []
 
     def _resolve_flag_targets(self, target, triggering_node_id: str | None) -> list[tuple[str, str]]:
@@ -501,6 +539,10 @@ class Engine:
             if node_def:
                 nearby = geo.nodes_near_node(node_def.node_id, target.meters, located)
                 return [("node", nid) for nid in nearby]
+
+        elif isinstance(target, TargetGroup):
+            kind = self._group_kind.get(target.group_label, "node")
+            return [(kind, m) for m in self.state.get_group_members(target.group_label)]
 
         return []
 
@@ -577,6 +619,9 @@ class Engine:
 
         if var.tracks == "flag_count":
             return str(len(self.state.get_nodes_with_flag(var.target)))
+
+        if var.tracks == "group_count":
+            return str(len(self.state.get_group_members(var.target)))
 
         if var.tracks == "waypoint_node_count":
             wp = self._get_waypoint(var.target)

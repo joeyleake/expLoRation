@@ -57,6 +57,13 @@ CREATE TABLE IF NOT EXISTS node_event_state (
     last_triggered_at TEXT,
     PRIMARY KEY (event_label, node_id)
 );
+
+CREATE TABLE IF NOT EXISTS node_groups (
+    group_label TEXT NOT NULL,
+    member_id   TEXT NOT NULL,
+    added_at    TEXT NOT NULL,
+    PRIMARY KEY (group_label, member_id)
+);
 """
 
 _FLAG_TABLE = {
@@ -90,6 +97,13 @@ class GameState:
                 self._conn.commit()
             except Exception:
                 pass
+
+    def apply_initial_groups(self, config: "GameConfig") -> None:
+        node_id_by_label = {n.label: n.node_id for n in config.nodes}
+        for grp in config.groups:
+            for member_label in grp.initial_members:
+                member = node_id_by_label[member_label] if grp.kind == "node" else member_label
+                self.add_to_group(grp.label, member)
 
     def apply_initial_flags(self, config: "GameConfig") -> None:
         for node in config.nodes:
@@ -229,6 +243,46 @@ class GameState:
                     (now,),
                 )
             self._conn.commit()
+
+    # ------------------------------------------------------------------
+    # Groups
+    # ------------------------------------------------------------------
+
+    def add_to_group(self, group_label: str, member_id: str) -> None:
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO node_groups(group_label, member_id, added_at)
+                VALUES(?, ?, ?)
+                ON CONFLICT(group_label, member_id) DO UPDATE SET added_at=excluded.added_at
+                """,
+                (group_label, member_id, _now_iso()),
+            )
+            self._conn.commit()
+
+    def remove_from_group(self, group_label: str, member_id: str) -> None:
+        with self._lock:
+            self._conn.execute(
+                "DELETE FROM node_groups WHERE group_label=? AND member_id=?",
+                (group_label, member_id),
+            )
+            self._conn.commit()
+
+    def is_in_group(self, group_label: str, member_id: str) -> bool:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT 1 FROM node_groups WHERE group_label=? AND member_id=?",
+                (group_label, member_id),
+            ).fetchone()
+            return row is not None
+
+    def get_group_members(self, group_label: str) -> list[str]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT member_id FROM node_groups WHERE group_label=?",
+                (group_label,),
+            ).fetchall()
+            return [r["member_id"] for r in rows]
 
     # ------------------------------------------------------------------
     # Event state

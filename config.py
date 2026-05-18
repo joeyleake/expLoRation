@@ -57,6 +57,13 @@ class NodeDef:
 
 
 @dataclass
+class GroupDef:
+    label: str
+    kind: str             # "node" | "zone" | "waypoint"
+    initial_members: list[str] = field(default_factory=list)
+
+
+@dataclass
 class Variable:
     label: str
     scope: str            # global | node | zone | waypoint | event
@@ -155,6 +162,11 @@ class TargetChannel:
     channel_label: str
 
 
+@dataclass
+class TargetGroup:
+    group_label: str
+
+
 Target = (
     TargetTriggeringNode
     | TargetNode
@@ -166,6 +178,7 @@ Target = (
     | TargetAllNearWaypoint
     | TargetAllNearNode
     | TargetChannel
+    | TargetGroup
 )
 
 
@@ -213,6 +226,18 @@ class EnableEventResponse:
 
 
 @dataclass
+class AddToGroupResponse:
+    group_label: str
+    target: Target
+
+
+@dataclass
+class RemoveFromGroupResponse:
+    group_label: str
+    target: Target
+
+
+@dataclass
 class RandomOption:
     weight: float
     responses: list   # list[Response] — unparameterized to avoid forward-ref issues
@@ -231,6 +256,8 @@ Response = (
     | SetEventTriggersResponse
     | DisableEventResponse
     | EnableEventResponse
+    | AddToGroupResponse
+    | RemoveFromGroupResponse
     | RandomOptionsResponse
 )
 
@@ -242,10 +269,14 @@ Response = (
 @dataclass
 class EventException:
     kind: str   # node_has_flag | node_lacks_flag | zone_has_flag | zone_lacks_flag |
-                # waypoint_has_flag | waypoint_lacks_flag | random_skip
-    flag: str | None = None    # required for flag-check kinds; None for random_skip
-    target: str | None = None  # zone/waypoint label; None → triggering node
+                # waypoint_has_flag | waypoint_lacks_flag | random_skip |
+                # node_in_group | node_not_in_group |
+                # zone_in_group | zone_not_in_group |
+                # waypoint_in_group | waypoint_not_in_group
+    flag: str | None = None    # required for flag-check kinds
+    target: str | None = None  # zone/waypoint label; also used for zone/waypoint_in_group checks
     chance: float | None = None  # required for random_skip; 0.0–1.0
+    group: str | None = None   # required for *_in_group kinds
 
 
 # ---------------------------------------------------------------------------
@@ -278,6 +309,7 @@ class GameConfig:
     messages: list[Message] = field(default_factory=list)
     flags: list[FlagDef] = field(default_factory=list)
     nodes: list[NodeDef] = field(default_factory=list)
+    groups: list[GroupDef] = field(default_factory=list)
     variables: list[Variable] = field(default_factory=list)
     events: list[Event] = field(default_factory=list)
 
@@ -310,6 +342,8 @@ def _parse_target(raw: dict) -> Target:
     if "to_all_near_node" in raw:
         r = raw["to_all_near_node"]
         return TargetAllNearNode(r["node"], float(r["meters"]))
+    if "to_group" in raw:
+        return TargetGroup(raw["to_group"])
     raise ConfigError(f"Unrecognised target in response: {raw}")
 
 
@@ -329,6 +363,10 @@ def _parse_response(raw: dict) -> Response:
         return DisableEventResponse(raw["event_label"])
     if kind == "enable_event":
         return EnableEventResponse(raw["event_label"])
+    if kind == "add_to_group":
+        return AddToGroupResponse(raw["group_label"], _parse_target(raw))
+    if kind == "remove_from_group":
+        return RemoveFromGroupResponse(raw["group_label"], _parse_target(raw))
     if kind == "random_options":
         options = []
         for opt in raw.get("options", []):
@@ -369,6 +407,7 @@ def _parse_exception(raw: dict) -> EventException:
         flag=raw.get("flag"),
         target=raw.get("target"),
         chance=float(raw["chance"]) if "chance" in raw else None,
+        group=raw.get("group"),
     )
 
 
@@ -415,7 +454,7 @@ def _validate_response(
     resp,
     message_labels: set, flag_labels: set, event_labels: set,
     zone_labels: set, waypoint_labels: set, node_labels: set,
-    channel_labels: set,
+    channel_labels: set, group_labels: set,
     ctx: str,
 ) -> None:
     if isinstance(resp, SendMessageResponse):
@@ -424,10 +463,12 @@ def _validate_response(
         _check_label(resp.flag_label, flag_labels, ctx)
     if isinstance(resp, (SetEventTriggersResponse, DisableEventResponse, EnableEventResponse)):
         _check_label(resp.event_label, event_labels, ctx)
+    if isinstance(resp, (AddToGroupResponse, RemoveFromGroupResponse)):
+        _check_label(resp.group_label, group_labels, ctx)
     target = getattr(resp, "target", None)
     if target is not None:
         _validate_target(target, zone_labels, waypoint_labels, flag_labels, node_labels,
-                         channel_labels, ctx)
+                         channel_labels, group_labels, ctx)
     if isinstance(resp, RandomOptionsResponse):
         if len(resp.options) < 2:
             raise ConfigError(f"{ctx}: random_options must have at least 2 options")
@@ -439,7 +480,7 @@ def _validate_response(
             for nested_resp in opt.responses:
                 _validate_response(
                     nested_resp, message_labels, flag_labels, event_labels,
-                    zone_labels, waypoint_labels, node_labels, channel_labels,
+                    zone_labels, waypoint_labels, node_labels, channel_labels, group_labels,
                     f"{ctx} random_options[{i}]",
                 )
 
@@ -456,6 +497,17 @@ def _validate(cfg: GameConfig) -> None:
     flag_labels = {f.label for f in cfg.flags}
     node_labels = {n.label for n in cfg.nodes}
     event_labels = {e.label for e in cfg.events}
+    group_labels = {g.label for g in cfg.groups}
+    group_kind = {g.label: g.kind for g in cfg.groups}
+
+    _GROUP_KINDS = ("node", "zone", "waypoint")
+    _member_pool = {"node": node_labels, "zone": zone_labels, "waypoint": waypoint_labels}
+    for grp in cfg.groups:
+        if grp.kind not in _GROUP_KINDS:
+            raise ConfigError(f"Group {grp.label!r}: kind must be one of {_GROUP_KINDS}")
+        pool = _member_pool[grp.kind]
+        for member in grp.initial_members:
+            _check_label(member, pool, f"Group {grp.label!r} initial_members")
 
     for event in cfg.events:
         ctx = f"Event {event.label!r}"
@@ -482,7 +534,7 @@ def _validate(cfg: GameConfig) -> None:
         for resp in event.responses:
             _validate_response(
                 resp, message_labels, flag_labels, event_labels,
-                zone_labels, waypoint_labels, node_labels, channel_labels,
+                zone_labels, waypoint_labels, node_labels, channel_labels, group_labels,
                 f"{ctx} response",
             )
 
@@ -492,6 +544,26 @@ def _validate(cfg: GameConfig) -> None:
                     raise ConfigError(f"{ctx} exception 'random_skip': 'chance' field required")
                 if not (0.0 <= exc.chance <= 1.0):
                     raise ConfigError(f"{ctx} exception 'random_skip': 'chance' must be 0.0–1.0")
+            elif exc.kind in ("node_in_group", "node_not_in_group"):
+                if not exc.group:
+                    raise ConfigError(f"{ctx} exception {exc.kind!r}: 'group' field required")
+                _check_label(exc.group, group_labels, f"{ctx} exception")
+                if group_kind.get(exc.group) != "node":
+                    raise ConfigError(f"{ctx} exception {exc.kind!r}: group {exc.group!r} must be kind 'node'")
+            elif exc.kind in ("zone_in_group", "zone_not_in_group"):
+                if not exc.group or not exc.target:
+                    raise ConfigError(f"{ctx} exception {exc.kind!r}: 'group' and 'target' fields required")
+                _check_label(exc.group, group_labels, f"{ctx} exception")
+                _check_label(exc.target, zone_labels, f"{ctx} exception target zone")
+                if group_kind.get(exc.group) != "zone":
+                    raise ConfigError(f"{ctx} exception {exc.kind!r}: group {exc.group!r} must be kind 'zone'")
+            elif exc.kind in ("waypoint_in_group", "waypoint_not_in_group"):
+                if not exc.group or not exc.target:
+                    raise ConfigError(f"{ctx} exception {exc.kind!r}: 'group' and 'target' fields required")
+                _check_label(exc.group, group_labels, f"{ctx} exception")
+                _check_label(exc.target, waypoint_labels, f"{ctx} exception target waypoint")
+                if group_kind.get(exc.group) != "waypoint":
+                    raise ConfigError(f"{ctx} exception {exc.kind!r}: group {exc.group!r} must be kind 'waypoint'")
             else:
                 if exc.flag is None:
                     raise ConfigError(f"{ctx} exception {exc.kind!r}: 'flag' field required")
@@ -521,6 +593,9 @@ def _validate(cfg: GameConfig) -> None:
         elif var.tracks == "flag_count":
             if var.target is None or var.target not in flag_labels:
                 raise ConfigError(f"{vctx} field 'target': must be a flag label")
+        elif var.tracks == "group_count":
+            if var.target is None or var.target not in group_labels:
+                raise ConfigError(f"{vctx} field 'target': must be a group label")
         elif var.tracks == "waypoint_node_count":
             if var.target is None or var.target not in waypoint_labels:
                 raise ConfigError(f"{vctx} field 'target': must be a waypoint label")
@@ -563,7 +638,7 @@ def _validate(cfg: GameConfig) -> None:
 def _validate_target(
     target: Target,
     zone_labels, waypoint_labels, flag_labels, node_labels,
-    channel_labels,
+    channel_labels, group_labels,
     ctx: str,
 ):
     if isinstance(target, TargetZone):
@@ -593,6 +668,9 @@ def _validate_target(
     elif isinstance(target, TargetNode):
         if target.node_label not in node_labels:
             raise ConfigError(f"{ctx}: node {target.node_label!r} not defined")
+    elif isinstance(target, TargetGroup):
+        if target.group_label not in group_labels:
+            raise ConfigError(f"{ctx}: group {target.group_label!r} not defined")
 
 
 # ---------------------------------------------------------------------------
@@ -637,6 +715,14 @@ def load_config(path: str) -> GameConfig:
                 initial_flags=n.get("initial_flags", []),
             )
             for n in raw.get("nodes", [])
+        ],
+        groups=[
+            GroupDef(
+                label=g["label"],
+                kind=g["kind"],
+                initial_members=g.get("initial_members", []),
+            )
+            for g in raw.get("groups", [])
         ],
         variables=[_parse_variable(v) for v in raw.get("variables", [])],
         events=[_parse_event(e) for e in raw.get("events", [])],

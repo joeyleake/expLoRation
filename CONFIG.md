@@ -17,6 +17,7 @@ waypoints:  [ ... ]
 messages:   [ ... ]
 flags:      [ ... ]
 nodes:      [ ... ]
+groups:     [ ... ]
 variables:  [ ... ]
 events:     [ ... ]
 ```
@@ -189,6 +190,48 @@ nodes:
 
 ---
 
+## Groups
+
+Groups are named, typed collections of nodes, zones, or waypoints whose membership
+is stored in SQLite and managed at runtime via `add_to_group` / `remove_from_group`
+responses. They complement flags: flags track *state* ("has this node won?"), groups
+track *membership* ("which team does this node belong to?").
+
+```yaml
+groups:
+  - label: red_team
+    kind: node                # "node" | "zone" | "waypoint"
+    initial_members:          # optional — members seeded at startup
+      - node_alpha
+      - node_beta
+
+  - label: active_zones
+    kind: zone
+
+  - label: required_checkpoints
+    kind: waypoint
+    initial_members:
+      - checkpoint_1
+      - checkpoint_2
+```
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `label` | string | yes | Unique name used in responses, targets, and exceptions |
+| `kind` | string | yes | `node`, `zone`, or `waypoint` — the type of members this group holds |
+| `initial_members` | list of labels | no | Members of the appropriate kind seeded when the bot starts |
+
+**Notes:**
+- `initial_members` entries must be valid labels for the group's `kind` (node labels for
+  `kind: node`, zone labels for `kind: zone`, waypoint labels for `kind: waypoint`).
+- Startup seeding is additive and non-destructive: restarting the bot re-adds `initial_members`
+  but does **not** remove members that were added dynamically at runtime. Group membership is
+  persistent across restarts — it is not reset like expiring flags.
+- Groups with no `initial_members` start empty and are populated entirely by `add_to_group`
+  responses at runtime.
+
+---
+
 ## Variables
 
 Variables compute live values from engine state and are interpolated into
@@ -285,6 +328,17 @@ Returns the count of nodes currently carrying the target flag.
   scope: global
   tracks: flag_count
   target: player             # flag label
+```
+
+#### `group_count` — members in a group
+
+Returns the count of current members in the target group. Works for groups of any kind.
+
+```yaml
+- label: red_team_size
+  scope: global
+  tracks: group_count
+  target: red_team           # group label
 ```
 
 #### `waypoint_node_count` — nodes near a waypoint
@@ -645,6 +699,43 @@ are documented in the [Targets](#targets) section below.
 | `flag_label` | yes | A `flags` label |
 | target key | yes | One target key (see Targets) |
 
+#### `add_to_group` — add member(s) to a group
+
+Adds one or more members to a group. For `kind: node` groups the target is any
+node-resolving key. For `kind: zone` groups use `to_zone`. For `kind: waypoint`
+groups use `to_waypoint_radius` (the waypoint label is extracted; the radius is
+ignored for membership purposes).
+
+```yaml
+- type: add_to_group
+  group_label: red_team
+  to_triggering_node: true    # node group — target is node-resolving
+
+- type: add_to_group
+  group_label: active_zones
+  to_zone: north_sector       # zone group — target must be a zone
+```
+
+| Field | Required | Description |
+|---|---|---|
+| `group_label` | yes | A `groups` label |
+| target key | yes | Must match the group's `kind` |
+
+#### `remove_from_group` — remove member(s) from a group
+
+Removes one or more members from a group. Same target rules as `add_to_group`.
+
+```yaml
+- type: remove_from_group
+  group_label: red_team
+  to_triggering_node: true
+```
+
+| Field | Required | Description |
+|---|---|---|
+| `group_label` | yes | A `groups` label |
+| target key | yes | Must match the group's `kind` |
+
 #### `request_location` — ask target node(s) to broadcast their GPS
 
 Sends a best-effort position request to the target node(s). The node may or may
@@ -770,6 +861,7 @@ The key determines which node(s), zone, or waypoint the response acts on.
 | `to_all_with_flag: <label>` | flag label | All nodes that currently carry that flag | |
 | `to_all_near_waypoint: {waypoint: <label>, meters: <n>}` | object | All nodes within `meters` of the waypoint | |
 | `to_all_near_node: {node: <label>, meters: <n>}` | object | All nodes within `meters` of the named hard-coded node (excluding the target node itself) | Both nodes must have known locations |
+| `to_group: <label>` | group label | For `kind: node` groups: all member nodes (send_message, request_location, add/remove_flag, add/remove_from_group). For `kind: zone` or `kind: waypoint` groups: all member zones/waypoints (add/remove_flag only). | |
 
 ---
 
@@ -792,8 +884,9 @@ exceptions:
 | Field | Required | Description |
 |---|---|---|
 | `kind` | yes | One of the exception kinds listed below |
-| `flag` | conditional | A `flags` label. Required for all flag-check kinds; not used by `random_skip`. |
-| `target` | conditional | Required for `zone_*` and `waypoint_*` kinds. Omit for `node_*` kinds. |
+| `flag` | conditional | A `flags` label. Required for all flag-check kinds. |
+| `group` | conditional | A `groups` label. Required for all `*_in_group` kinds. |
+| `target` | conditional | Required for `zone_*`, `waypoint_*`, `zone_in_group`, and `waypoint_in_group` kinds. Omit for `node_*` kinds. |
 | `chance` | conditional | Float 0.0–1.0. Required for `random_skip`. |
 
 | Kind | Fields | Meaning |
@@ -804,15 +897,21 @@ exceptions:
 | `zone_lacks_flag` | `flag`, `target` (zone) | Skip if the named zone does not have this flag |
 | `waypoint_has_flag` | `flag`, `target` (waypoint) | Skip if the named waypoint has this flag |
 | `waypoint_lacks_flag` | `flag`, `target` (waypoint) | Skip if the named waypoint does not have this flag |
+| `node_in_group` | `group` | Skip if the triggering node is a member of this node-kind group |
+| `node_not_in_group` | `group` | Skip if the triggering node is not a member of this node-kind group |
+| `zone_in_group` | `group`, `target` (zone) | Skip if the named zone is a member of this zone-kind group |
+| `zone_not_in_group` | `group`, `target` (zone) | Skip if the named zone is not a member of this zone-kind group |
+| `waypoint_in_group` | `group`, `target` (waypoint) | Skip if the named waypoint is a member of this waypoint-kind group |
+| `waypoint_not_in_group` | `group`, `target` (waypoint) | Skip if the named waypoint is not a member of this waypoint-kind group |
 | `random_skip` | `chance` | Skip with probability `chance` (e.g. `0.3` = 30% chance of skipping) |
 
-**Evaluation order:** All flag-check exceptions are evaluated first. `random_skip` is rolled only
-if every flag-check exception passes. This ensures a deterministic exception (e.g. "player already
-has the winner flag") always takes precedence over randomness.
+**Evaluation order:** All deterministic exceptions (flag checks, group checks) are evaluated first.
+`random_skip` is rolled only if every deterministic exception passes. This ensures a deterministic
+exception (e.g. "player already has the winner flag") always takes precedence over randomness.
 
 **Note:** For `time_window` and `in_zone_on_start` triggers there is no
-triggering node, so `node_has_flag` and `node_lacks_flag` exceptions will never
-match and will not cause a skip.
+triggering node, so `node_has_flag`, `node_lacks_flag`, `node_in_group`, and
+`node_not_in_group` exceptions will never match and will not cause a skip.
 
 ```yaml
 exceptions:
@@ -877,6 +976,13 @@ conditions are violated:
 - `random_skip` exceptions require `chance` (float 0.0–1.0). `flag` and `target` are not used.
 - `random_options` responses require at least 2 options, each with `weight > 0` and at least one response. All labels inside nested branches are validated the same way as top-level responses.
 - Each `nodes` entry's `initial_flags` must all reference defined flags.
+- `groups` entries require `kind` to be `node`, `zone`, or `waypoint`.
+- Each `groups` entry's `initial_members` must reference labels of the appropriate kind.
+- `add_to_group` / `remove_from_group` responses require a valid `group_label`.
+- `node_in_group` / `node_not_in_group` exceptions require `group` pointing to a `kind: node` group.
+- `zone_in_group` / `zone_not_in_group` exceptions require `group` (a `kind: zone` group) and `target` (a zone label).
+- `waypoint_in_group` / `waypoint_not_in_group` exceptions require `group` (a `kind: waypoint` group) and `target` (a waypoint label).
+- `group_count` variables require `target` to be a defined group label.
 
 Errors are reported with the event label and field that caused the problem, for
 example:
