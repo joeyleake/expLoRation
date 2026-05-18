@@ -96,7 +96,8 @@ class Variable:
 @dataclass
 class ProximityTrigger:
     kind: str             # near_waypoint | near_zone | near_node | in_zone_on_start
-    target_label: str
+    target_label: str | None = None
+    target_flag: str | None = None  # near_waypoint only: match any dynamic waypoint with this flag
     meters: float | None = None  # required for near_* kinds
 
 
@@ -120,6 +121,17 @@ class VariableThresholdTrigger:
     variable_label: str
     operator: str         # "lt" | "lte" | "eq" | "neq" | "gte" | "gt"
     value: int | float | str
+
+
+@dataclass
+class FlagExpiryTrigger:
+    flag_label: str
+    target_kind: str      # "node" | "zone" | "waypoint" | "dynamic_waypoint"
+
+
+@dataclass
+class WaypointExpiryTrigger:
+    had_flag: str | None = None  # optional — only fire for waypoints that had this flag
 
 
 # ---------------------------------------------------------------------------
@@ -284,6 +296,27 @@ class RandomOptionsResponse:
     options: list[RandomOption]
 
 
+@dataclass
+class CreateWaypointResponse:
+    expiry_mins: float | None = None
+    initial_flags: list[str] = field(default_factory=list)
+
+
+@dataclass
+class AddDynamicWaypointFlagResponse:
+    flag_label: str
+
+
+@dataclass
+class RemoveDynamicWaypointFlagResponse:
+    flag_label: str
+
+
+@dataclass
+class DestroyWaypointResponse:
+    pass
+
+
 Response = (
     SendMessageResponse
     | AddFlagResponse
@@ -297,6 +330,10 @@ Response = (
     | SetVariableResponse
     | IncrementVariableResponse
     | RandomOptionsResponse
+    | CreateWaypointResponse
+    | AddDynamicWaypointFlagResponse
+    | RemoveDynamicWaypointFlagResponse
+    | DestroyWaypointResponse
 )
 
 
@@ -324,7 +361,7 @@ class EventException:
 @dataclass
 class Event:
     label: str
-    trigger: ProximityTrigger | TimedTrigger | CommandTrigger | VariableThresholdTrigger
+    trigger: ProximityTrigger | TimedTrigger | CommandTrigger | VariableThresholdTrigger | FlagExpiryTrigger | WaypointExpiryTrigger
     responses: list[Response]
     exceptions: list[EventException] = field(default_factory=list)
     max_triggers: int | None = None
@@ -425,15 +462,27 @@ def _parse_response(raw: dict) -> Response:
                 responses=[_parse_response(r) for r in opt.get("responses", [])],
             ))
         return RandomOptionsResponse(options=options)
+    if kind == "create_waypoint":
+        return CreateWaypointResponse(
+            expiry_mins=float(raw["expiry_mins"]) if "expiry_mins" in raw else None,
+            initial_flags=raw.get("initial_flags", []),
+        )
+    if kind == "add_waypoint_flag":
+        return AddDynamicWaypointFlagResponse(flag_label=raw["flag_label"])
+    if kind == "remove_waypoint_flag":
+        return RemoveDynamicWaypointFlagResponse(flag_label=raw["flag_label"])
+    if kind == "destroy_waypoint":
+        return DestroyWaypointResponse()
     raise ConfigError(f"Unknown response type: {kind!r}")
 
 
-def _parse_trigger(raw: dict) -> ProximityTrigger | TimedTrigger | CommandTrigger:
+def _parse_trigger(raw: dict):
     kind = raw.get("type")
     if kind in ("near_waypoint", "near_zone", "near_node", "in_zone_on_start", "in_zone", "enters_zone", "leaves_zone"):
         return ProximityTrigger(
             kind=kind,
-            target_label=raw["target"],
+            target_label=raw.get("target"),
+            target_flag=raw.get("target_flag"),
             meters=float(raw["meters"]) if "meters" in raw else None,
         )
     if kind == "time_window":
@@ -453,6 +502,15 @@ def _parse_trigger(raw: dict) -> ProximityTrigger | TimedTrigger | CommandTrigge
             variable_label=raw["variable"],
             operator=raw["operator"],
             value=raw["value"],
+        )
+    if kind == "flag_expired":
+        return FlagExpiryTrigger(
+            flag_label=raw["flag_label"],
+            target_kind=raw["target_kind"],
+        )
+    if kind == "waypoint_expired":
+        return WaypointExpiryTrigger(
+            had_flag=raw.get("had_flag"),
         )
     raise ConfigError(f"Unknown trigger type: {kind!r}")
 
@@ -539,6 +597,13 @@ def _validate_response(
                     zone_labels, waypoint_labels, node_labels, channel_labels, group_labels,
                     f"{ctx} random_options[{i}]",
                 )
+    if isinstance(resp, CreateWaypointResponse):
+        if resp.expiry_mins is not None and resp.expiry_mins <= 0:
+            raise ConfigError(f"{ctx}: create_waypoint expiry_mins must be positive")
+        for flag_label in resp.initial_flags:
+            _check_label(flag_label, flag_labels, f"{ctx} create_waypoint initial_flags")
+    if isinstance(resp, (AddDynamicWaypointFlagResponse, RemoveDynamicWaypointFlagResponse)):
+        _check_label(resp.flag_label, flag_labels, ctx)
 
 
 # ---------------------------------------------------------------------------
@@ -622,12 +687,22 @@ def _validate(cfg: GameConfig) -> None:
         t = event.trigger
 
         if isinstance(t, ProximityTrigger):
-            if t.kind in ("near_waypoint",):
-                _check_label(t.target_label, waypoint_labels, f"{ctx} trigger")
-            elif t.kind in ("near_zone", "in_zone_on_start", "in_zone", "enters_zone", "leaves_zone"):
-                _check_label(t.target_label, zone_labels, f"{ctx} trigger")
-            elif t.kind == "near_node":
-                _check_label(t.target_label, node_labels, f"{ctx} trigger")
+            if t.kind == "near_waypoint":
+                has_target = t.target_label is not None
+                has_flag = t.target_flag is not None
+                if has_target == has_flag:
+                    raise ConfigError(f"{ctx} trigger near_waypoint requires exactly one of 'target' or 'target_flag'")
+                if has_target:
+                    _check_label(t.target_label, waypoint_labels, f"{ctx} trigger")
+                else:
+                    _check_label(t.target_flag, flag_labels, f"{ctx} trigger")
+            else:
+                if t.target_flag is not None:
+                    raise ConfigError(f"{ctx} trigger: 'target_flag' is only valid on near_waypoint triggers")
+                if t.kind in ("near_zone", "in_zone_on_start", "in_zone", "enters_zone", "leaves_zone"):
+                    _check_label(t.target_label, zone_labels, f"{ctx} trigger")
+                elif t.kind == "near_node":
+                    _check_label(t.target_label, node_labels, f"{ctx} trigger")
             if t.kind not in ("in_zone_on_start", "in_zone", "enters_zone", "leaves_zone") and t.meters is None:
                 raise ConfigError(f"{ctx} trigger {t.kind!r} requires 'meters'")
 
@@ -649,6 +724,37 @@ def _validate(cfg: GameConfig) -> None:
             if mutable_var_def_map[t.variable_label].type == "string" and t.operator not in ("eq", "neq"):
                 raise ConfigError(f"{ctx} trigger: string variables only support eq/neq operators")
 
+        elif isinstance(t, FlagExpiryTrigger):
+            _FLAG_EXPIRY_KINDS = ("node", "zone", "waypoint", "dynamic_waypoint")
+            _check_label(t.flag_label, flag_labels, f"{ctx} trigger")
+            if t.target_kind not in _FLAG_EXPIRY_KINDS:
+                raise ConfigError(
+                    f"{ctx} trigger: flag_expired target_kind must be one of {_FLAG_EXPIRY_KINDS}"
+                )
+
+        elif isinstance(t, WaypointExpiryTrigger):
+            if t.had_flag is not None:
+                _check_label(t.had_flag, flag_labels, f"{ctx} trigger")
+
+        # Whether the trigger provides a live dynamic waypoint ID (for add/remove_waypoint_flag)
+        _is_dynamic_waypoint_trigger = (
+            isinstance(t, ProximityTrigger)
+            and t.kind == "near_waypoint"
+            and t.target_flag is not None
+        )
+        _flag_expired_dynamic = (
+            isinstance(t, FlagExpiryTrigger)
+            and t.target_kind == "dynamic_waypoint"
+        )
+        _can_add_remove_waypoint_flag = _is_dynamic_waypoint_trigger or _flag_expired_dynamic
+        _has_node_context = not (
+            isinstance(t, TimedTrigger)
+            or isinstance(t, WaypointExpiryTrigger)
+            or (isinstance(t, ProximityTrigger) and t.kind == "in_zone_on_start")
+            or (isinstance(t, FlagExpiryTrigger) and t.target_kind != "node")
+        )
+        _has_dynamic_waypoint_context = _is_dynamic_waypoint_trigger or _flag_expired_dynamic
+
         for resp in event.responses:
             _validate_response(
                 resp, message_labels, flag_labels, event_labels,
@@ -656,6 +762,25 @@ def _validate(cfg: GameConfig) -> None:
                 f"{ctx} response",
             )
             _validate_mutable_response(resp, mutable_var_def_map, f"{ctx} response")
+            if not _has_node_context:
+                target = getattr(resp, "target", None)
+                if isinstance(target, TargetTriggeringNode):
+                    raise ConfigError(
+                        f"{ctx}: to_triggering_node is not valid for this trigger type (no node context)"
+                    )
+            if isinstance(resp, CreateWaypointResponse) and not _has_node_context:
+                raise ConfigError(f"{ctx}: create_waypoint requires a trigger that provides node context")
+            if isinstance(resp, DestroyWaypointResponse):
+                if not _is_dynamic_waypoint_trigger:
+                    raise ConfigError(
+                        f"{ctx}: destroy_waypoint is only valid in near_waypoint + target_flag events"
+                    )
+            if isinstance(resp, (AddDynamicWaypointFlagResponse, RemoveDynamicWaypointFlagResponse)):
+                if not _can_add_remove_waypoint_flag:
+                    raise ConfigError(
+                        f"{ctx}: {type(resp).__name__} requires a dynamic waypoint context "
+                        f"(near_waypoint + target_flag, or flag_expired + target_kind: dynamic_waypoint)"
+                    )
 
         for exc in event.exceptions:
             if exc.kind == "random_skip":
@@ -689,8 +814,14 @@ def _validate(cfg: GameConfig) -> None:
                 _check_label(exc.flag, flag_labels, f"{ctx} exception")
                 if exc.kind in ("zone_has_flag", "zone_lacks_flag") and exc.target:
                     _check_label(exc.target, zone_labels, f"{ctx} exception")
-                if exc.kind in ("waypoint_has_flag", "waypoint_lacks_flag") and exc.target:
-                    _check_label(exc.target, waypoint_labels, f"{ctx} exception")
+                if exc.kind in ("waypoint_has_flag", "waypoint_lacks_flag"):
+                    if exc.target:
+                        _check_label(exc.target, waypoint_labels, f"{ctx} exception")
+                    elif not _has_dynamic_waypoint_context:
+                        raise ConfigError(
+                            f"{ctx}: exception {exc.kind!r} without 'target' is only valid "
+                            f"in events with a dynamic waypoint context"
+                        )
 
     for node in cfg.nodes:
         for fl in node.initial_flags:

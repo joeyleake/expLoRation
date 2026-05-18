@@ -696,7 +696,10 @@ Each event has exactly one trigger, defined as an object with a `type` field.
 #### `near_waypoint` — node enters waypoint radius
 
 Fires when the bot receives a location update from any node and that node is
-within `meters` of the named waypoint.
+within `meters` of a waypoint. The waypoint can be a **static** waypoint defined
+in config (`target`) or any **dynamic** waypoint carrying a specified flag (`target_flag`).
+
+**Static waypoint (config-defined):**
 
 ```yaml
 trigger:
@@ -705,10 +708,28 @@ trigger:
   meters: 20               # radius in metres
 ```
 
+**Dynamic waypoint (runtime-created, matched by flag):**
+
+```yaml
+trigger:
+  type: near_waypoint
+  target_flag: gravestone  # fires against any live dynamic waypoint with this flag
+  meters: 20
+```
+
 | Field | Required | Description |
 |---|---|---|
-| `target` | yes | A `waypoints` label |
+| `target` | one of `target`/`target_flag` | A `waypoints` label (static config waypoint) |
+| `target_flag` | one of `target`/`target_flag` | A `flags` label. Fires against any live dynamic waypoint carrying this flag. |
 | `meters` | yes | Radius in metres. The trigger fires if the node is within this distance. |
+
+**Dynamic waypoint matching:**
+- When `target_flag` is used, all non-expired dynamic waypoints carrying that flag are checked.
+- If multiple qualifying waypoints are within range, the nearest one wins.
+- The matched waypoint's ID is stored in event context as `triggering_waypoint_id` and is available to
+  companion response types (`add_waypoint_flag`, `remove_waypoint_flag`, `destroy_waypoint`) and to
+  targetless `waypoint_has_flag` / `waypoint_lacks_flag` exceptions.
+- Exactly one of `target` or `target_flag` must be specified — using both or neither is a config error.
 
 #### `near_zone` — node enters zone proximity
 
@@ -840,37 +861,93 @@ trigger:
 #### `dm` — node sends a matching DM to the bot
 
 Fires when any node sends a direct message to the bot whose text matches a
-defined message, and that node is currently inside the specified zone.
+defined message. If `zone_label` is set, the sender must also be inside that zone.
 
 ```yaml
 trigger:
   type: dm
   message_label: hint_request    # messages label — text must match exactly
-  zone_label: start_zone         # zones label — sender must be inside this zone
+  zone_label: start_zone         # optional — restrict to senders inside this zone
 ```
 
 | Field | Required | Description |
 |---|---|---|
 | `message_label` | yes | A `messages` label. The incoming DM text is compared to `message.text` after stripping whitespace. |
-| `zone_label` | yes | A `zones` label. The sender must have a known location inside this zone. |
+| `zone_label` | no | A `zones` label. If set, the sender must have a known location inside this zone. If omitted, any sender can trigger the event regardless of location. |
+
+**Note:** When `zone_label` is omitted, a sender with no known GPS fix can still trigger the event. If you need to gate on location, include `zone_label`.
+
+#### `flag_expired` — a flag's timer ran out
+
+Fires when a flag with an `expiry_mins` setting reaches its expiry time and is deleted. Fires
+once per expired (entity, flag) pair — if three nodes' `stunned` flag expires in the same tick,
+the event fires three times, each with the appropriate entity as context.
+
+```yaml
+trigger:
+  type: flag_expired
+  flag_label: stunned          # flags label — must have expiry_mins set to ever fire
+  target_kind: node            # "node" | "zone" | "waypoint" | "dynamic_waypoint"
+```
+
+| Field | Required | Description |
+|---|---|---|
+| `flag_label` | yes | A `flags` label |
+| `target_kind` | yes | The kind of entity that lost the flag: `node`, `zone`, `waypoint`, or `dynamic_waypoint` |
+
+**Context by `target_kind`:**
+
+| `target_kind` | Triggering context | `to_triggering_node` valid? | Waypoint responses valid? |
+|---|---|---|---|
+| `node` | The node whose flag expired | yes | no |
+| `zone` | None (like `time_window`) | no | no |
+| `waypoint` | None | no | no |
+| `dynamic_waypoint` | The dynamic waypoint whose flag expired | no | `add_waypoint_flag`, `remove_waypoint_flag` only |
+
+**Notes:**
+- `flag_expired` does NOT fire when a flag is removed via a `remove_flag` response — only when a timer naturally expires.
+- `flag_expired` does NOT fire for flags cascade-deleted when a dynamic waypoint itself expires. Use `waypoint_expired` for that.
+- `destroy_waypoint` is not valid in `flag_expired` events; the waypoint is still alive when a flag on it expires.
+- For `target_kind: dynamic_waypoint`, targetless `waypoint_has_flag` / `waypoint_lacks_flag` exceptions check the triggering dynamic waypoint (same as `near_waypoint + target_flag` events).
+
+#### `waypoint_expired` — a dynamic waypoint's timer ran out
+
+Fires when a dynamic waypoint created by `create_waypoint` reaches its `expiry_mins` limit and
+is deleted. Fires once per expired waypoint. The waypoint and all its flags are already deleted
+by the time the event fires; this is the opportunity to react to the disappearance.
+
+```yaml
+trigger:
+  type: waypoint_expired
+  had_flag: gravestone        # optional — only fire for waypoints that had this flag
+```
+
+| Field | Required | Description |
+|---|---|---|
+| `had_flag` | no | A `flags` label. If set, only fires for waypoints that carried this flag at the time they expired. Omit to fire for all expired dynamic waypoints. |
+
+**Notes:**
+- No triggering node or live waypoint context. `to_triggering_node`, `add_waypoint_flag`, `remove_waypoint_flag`, and `destroy_waypoint` are all invalid in responses.
+- Useful for: channel broadcasts, flag operations on nodes, event enable/disable.
+- Each dynamic waypoint can carry multiple flags; `had_flag` checks membership in the set of flags the waypoint held at expiry, not whether the flag itself expired first.
 
 #### `channel` — node sends a matching message on a monitored channel
 
 Fires when any node broadcasts a message on a specific channel whose text
-matches a defined message, and that node is currently inside the specified zone.
+matches a defined message. If `zone_label` is set, the sender must also be inside that zone.
 
 ```yaml
 trigger:
   type: channel
   message_label: activation_code
-  zone_label: clue_zone
+  zone_label: clue_zone          # optional — restrict to senders inside this zone
   channel_label: main            # channels label — message must arrive on this channel
 ```
 
 | Field | Required | Description |
 |---|---|---|
 | `message_label` | yes | A `messages` label |
-| `zone_label` | yes | A `zones` label — sender must be inside this zone |
+| `zone_label` | no | A `zones` label — if set, sender must be inside this zone |
 | `channel_label` | yes | A `channels` label — message must arrive on this channel |
 
 ---
@@ -1003,6 +1080,71 @@ again. Has no effect if the event is already enabled.
 |---|---|---|
 | `event_label` | yes | An `events` label |
 
+#### `create_waypoint` — stamp a dynamic waypoint at the triggering node's location
+
+Creates a new dynamic waypoint at the triggering node's current GPS position. The waypoint
+exists only in the runtime database — it does not require any config declaration. Other events
+can match against it using `near_waypoint` with `target_flag`.
+
+```yaml
+- type: create_waypoint
+  expiry_mins: 60           # optional — waypoint is deleted after this many minutes
+  initial_flags:            # optional — flags applied to the waypoint on creation
+    - gravestone
+```
+
+| Field | Required | Description |
+|---|---|---|
+| `expiry_mins` | no | Minutes until the waypoint and all its flags are automatically deleted. Omit for a permanent waypoint. |
+| `initial_flags` | no | List of `flags` labels to attach to the waypoint at creation time. Each flag's own `expiry_mins` (from its definition) applies independently. |
+
+**Notes:**
+- Requires a triggering node with a known GPS fix. If the node has no location, the response is skipped with a warning.
+- Not valid in `time_window` or `in_zone_on_start` events, which have no triggering node.
+- Waypoint expiry is cascade-deleted: when the waypoint expires, all of its flags are also deleted in the same transaction.
+- The created waypoint has an auto-increment integer ID (not a label) and is accessed by other events exclusively through `target_flag` matching.
+
+#### `add_waypoint_flag` — add a flag to the triggering dynamic waypoint
+
+Adds a flag to the dynamic waypoint that triggered the current event. Only valid in
+events whose trigger is `near_waypoint` with `target_flag`.
+
+```yaml
+- type: add_waypoint_flag
+  flag_label: looted        # flags label
+```
+
+| Field | Required | Description |
+|---|---|---|
+| `flag_label` | yes | A `flags` label. The flag's own `expiry_mins` applies. |
+
+#### `remove_waypoint_flag` — remove a flag from the triggering dynamic waypoint
+
+Removes a flag from the dynamic waypoint that triggered the current event. Only valid in
+events whose trigger is `near_waypoint` with `target_flag`.
+
+```yaml
+- type: remove_waypoint_flag
+  flag_label: looted
+```
+
+| Field | Required | Description |
+|---|---|---|
+| `flag_label` | yes | A `flags` label |
+
+#### `destroy_waypoint` — delete the triggering dynamic waypoint
+
+Permanently deletes the dynamic waypoint that triggered the current event, along with
+all of its flags. Only valid in events whose trigger is `near_waypoint` with `target_flag`.
+
+```yaml
+- type: destroy_waypoint
+```
+
+No additional fields — the waypoint to destroy is always the one that triggered the event.
+
+---
+
 #### `set_event_triggers` — manually set an event's trigger count
 
 Resets or advances the `times_triggered` counter on any event. Set to `0` to
@@ -1079,13 +1221,35 @@ The key determines which node(s), zone, or waypoint the response acts on.
 | `to_node: <label>` | node label | The single hard-coded node with that label | |
 | `to_channel: <label>` | channel label | Broadcasts the message on that channel | `send_message` only |
 | `to_zone: <label>` | zone label | The zone object itself | `add_flag` / `remove_flag` only — sets the flag on the zone, not on individual nodes |
-| `to_flag: <label>` | flag label | All nodes that currently carry that flag | |
-| `to_waypoint_radius: {waypoint: <label>, meters: <n>}` | object | All nodes within `meters` of the waypoint | |
-| `to_all_in_zone: <label>` | zone label | All nodes with a known location currently inside the zone | |
-| `to_all_with_flag: <label>` | flag label | All nodes that currently carry that flag | |
-| `to_all_near_waypoint: {waypoint: <label>, meters: <n>}` | object | All nodes within `meters` of the waypoint | |
-| `to_all_near_node: {node: <label>, meters: <n>}` | object | All nodes within `meters` of the named hard-coded node (excluding the target node itself) | Both nodes must have known locations |
-| `to_group: <label>` | group label | For `kind: node` groups: all member nodes (send_message, request_location, add/remove_flag, add/remove_from_group). For `kind: zone` or `kind: waypoint` groups: all member zones/waypoints (add/remove_flag only). | |
+| `to_flag: <label>` | flag label | All nodes that currently carry that flag | Supports `random_n` |
+| `to_waypoint_radius: {waypoint: <label>, meters: <n>}` | object | All nodes within `meters` of the waypoint | Supports `random_n` |
+| `to_all_in_zone: <label>` | zone label | All nodes with a known location currently inside the zone | Supports `random_n` |
+| `to_all_with_flag: <label>` | flag label | All nodes that currently carry that flag | Supports `random_n` |
+| `to_all_near_waypoint: {waypoint: <label>, meters: <n>}` | object | All nodes within `meters` of the waypoint | Supports `random_n` |
+| `to_all_near_node: {node: <label>, meters: <n>}` | object | All nodes within `meters` of the named hard-coded node (excluding the target node itself) | Both nodes must have known locations. Supports `random_n` |
+| `to_group: <label>` | group label | For `kind: node` groups: all member nodes (send_message, request_location, add/remove_flag, add/remove_from_group). For `kind: zone` or `kind: waypoint` groups: all member zones/waypoints (add/remove_flag only). | Supports `random_n` for `kind: node` groups |
+
+**`random_n` — random sampling from multi-node targets**
+
+Any target marked "Supports `random_n`" above accepts an optional `random_n` field. When set,
+the resolved node list is randomly sampled down to at most `random_n` nodes before the response
+is applied. If fewer nodes are resolved than `random_n`, all of them are used.
+
+```yaml
+- type: send_message
+  message_label: chosen
+  to_all_in_zone: play_area
+  random_n: 3              # pick 3 random nodes from the zone
+```
+
+```yaml
+- type: add_flag
+  flag_label: targeted
+  to_all_with_flag: active_player
+  random_n: 1              # tag one random active player
+```
+
+`random_n` must be a positive integer. It is not valid on single-node targets (`to_triggering_node`, `to_node`) or non-node targets (`to_channel`, `to_zone`).
 
 ---
 
@@ -1110,7 +1274,7 @@ exceptions:
 | `kind` | yes | One of the exception kinds listed below |
 | `flag` | conditional | A `flags` label. Required for all flag-check kinds. |
 | `group` | conditional | A `groups` label. Required for all `*_in_group` kinds. |
-| `target` | conditional | Required for `zone_*`, `waypoint_*`, `zone_in_group`, and `waypoint_in_group` kinds. Omit for `node_*` kinds. |
+| `target` | conditional | Required for `zone_*`, `zone_in_group`, and `waypoint_in_group` kinds, and for static-waypoint `waypoint_*` kinds. Omit for `node_*` kinds and for dynamic-waypoint `waypoint_*` checks (see below). |
 | `chance` | conditional | Float 0.0–1.0. Required for `random_skip`. |
 
 | Kind | Fields | Meaning |
@@ -1119,8 +1283,8 @@ exceptions:
 | `node_lacks_flag` | `flag` | Skip if the triggering node does not have this flag |
 | `zone_has_flag` | `flag`, `target` (zone) | Skip if the named zone has this flag |
 | `zone_lacks_flag` | `flag`, `target` (zone) | Skip if the named zone does not have this flag |
-| `waypoint_has_flag` | `flag`, `target` (waypoint) | Skip if the named waypoint has this flag |
-| `waypoint_lacks_flag` | `flag`, `target` (waypoint) | Skip if the named waypoint does not have this flag |
+| `waypoint_has_flag` | `flag`, `target` (waypoint, optional) | Skip if the named waypoint has this flag. If `target` is omitted, checks the **triggering dynamic waypoint** instead (only valid in `near_waypoint target_flag` events). |
+| `waypoint_lacks_flag` | `flag`, `target` (waypoint, optional) | Skip if the named waypoint does not have this flag. If `target` is omitted, checks the **triggering dynamic waypoint** (only valid in `near_waypoint target_flag` events). |
 | `node_in_group` | `group` | Skip if the triggering node is a member of this node-kind group |
 | `node_not_in_group` | `group` | Skip if the triggering node is not a member of this node-kind group |
 | `zone_in_group` | `group`, `target` (zone) | Skip if the named zone is a member of this zone-kind group |
@@ -1194,11 +1358,21 @@ conditions are violated:
 - Every label referenced in a trigger, response, or exception must be defined in
   the corresponding top-level section.
 - `near_waypoint`, `near_zone`, and `near_node` triggers require `meters` to be set. `in_zone` and `in_zone_on_start` do not use `meters`.
+- `near_waypoint` requires exactly one of `target` (static waypoint label) or `target_flag` (flag label). Using both or neither is a config error.
+- `target_flag` is only valid on `near_waypoint`. Using it on any other trigger kind is a config error.
 - `channel` triggers require `channel_label`.
 - `zone_has_flag` / `zone_lacks_flag` exceptions require `target`.
-- `waypoint_has_flag` / `waypoint_lacks_flag` exceptions require `target`.
+- `waypoint_has_flag` / `waypoint_lacks_flag` with `target` set require `target` to be a defined waypoint label. Without `target`, they check the triggering dynamic waypoint and are only valid in `near_waypoint target_flag` events.
 - `random_skip` exceptions require `chance` (float 0.0–1.0). `flag` and `target` are not used.
 - `random_options` responses require at least 2 options, each with `weight > 0` and at least one response. All labels inside nested branches are validated the same way as top-level responses.
+- `random_n` must be a positive integer when set. It is not valid on single-node or non-node targets.
+- `create_waypoint` responses are not valid in `time_window`, `in_zone_on_start`, `waypoint_expired`, or `flag_expired` events with `target_kind` other than `node` (no triggering node).
+- `destroy_waypoint` is only valid in `near_waypoint + target_flag` events.
+- `add_waypoint_flag` and `remove_waypoint_flag` are valid in `near_waypoint + target_flag` events and in `flag_expired` events with `target_kind: dynamic_waypoint`. They are not valid in `waypoint_expired` events (the waypoint is already gone).
+- `to_triggering_node` is not valid in events with no node context: `time_window`, `in_zone_on_start`, `waypoint_expired`, and `flag_expired` with `target_kind` other than `node`.
+- `flag_expired` triggers require `flag_label` (a defined flag) and `target_kind` (one of `node`, `zone`, `waypoint`, `dynamic_waypoint`).
+- `waypoint_expired` trigger's `had_flag`, if set, must reference a defined flag.
+- `waypoint_has_flag` / `waypoint_lacks_flag` exceptions without `target` are valid in `near_waypoint + target_flag` events and `flag_expired + target_kind: dynamic_waypoint` events.
 - Each `nodes` entry's `initial_flags` must all reference defined flags.
 - `groups` entries require `kind` to be `node`, `zone`, or `waypoint`.
 - Each `groups` entry's `initial_members` must reference labels of the appropriate kind.
