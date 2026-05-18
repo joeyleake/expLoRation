@@ -558,6 +558,13 @@ class Engine:
             value = min(var_def.max, value)
         return value
 
+    @staticmethod
+    def _apply_random_n(items: list, target) -> list:
+        n = getattr(target, "random_n", None)
+        if n is not None and len(items) > n:
+            return random.sample(items, n)
+        return items
+
     def _resolve_node_targets(self, target, triggering_node_id: str | None) -> list[str]:
         located = self.state.get_all_located_nodes()
 
@@ -570,26 +577,28 @@ class Engine:
 
         if isinstance(target, TargetAllInZone):
             zone = self._get_zone(target.zone_label)
-            return geo.nodes_in_zone(zone, located) if zone else []
+            result = geo.nodes_in_zone(zone, located) if zone else []
+            return self._apply_random_n(result, target)
 
         if isinstance(target, (TargetFlag, TargetAllWithFlag)):
-            fl = target.flag_label if isinstance(target, TargetAllWithFlag) else target.flag_label
-            return self.state.get_nodes_with_flag(fl)
+            result = self.state.get_nodes_with_flag(target.flag_label)
+            return self._apply_random_n(result, target)
 
         if isinstance(target, (TargetWaypointRadius, TargetAllNearWaypoint)):
-            wp_label = target.waypoint_label
-            waypoint = self._get_waypoint(wp_label)
-            return geo.nodes_near_waypoint(waypoint, target.meters, located) if waypoint else []
+            waypoint = self._get_waypoint(target.waypoint_label)
+            result = geo.nodes_near_waypoint(waypoint, target.meters, located) if waypoint else []
+            return self._apply_random_n(result, target)
 
         if isinstance(target, TargetAllNearNode):
             node_def = self._get_node_def(target.node_label)
             if node_def is None:
                 return []
-            return geo.nodes_near_node(node_def.node_id, target.meters, located)
+            result = geo.nodes_near_node(node_def.node_id, target.meters, located)
+            return self._apply_random_n(result, target)
 
         if isinstance(target, TargetGroup):
-            # Only valid for node-kind groups
-            return self.state.get_group_members(target.group_label)
+            result = self.state.get_group_members(target.group_label)
+            return self._apply_random_n(result, target)
 
         return []
 
@@ -611,30 +620,31 @@ class Engine:
 
         elif isinstance(target, TargetAllInZone):
             zone = self._get_zone(target.zone_label)
-            if zone:
-                return [("node", nid) for nid in geo.nodes_in_zone(zone, located)]
+            result = [("node", nid) for nid in geo.nodes_in_zone(zone, located)] if zone else []
+            return self._apply_random_n(result, target)
 
         elif isinstance(target, (TargetFlag, TargetAllWithFlag)):
-            fl = target.flag_label
-            return [("node", nid) for nid in self.state.get_nodes_with_flag(fl)]
+            result = [("node", nid) for nid in self.state.get_nodes_with_flag(target.flag_label)]
+            return self._apply_random_n(result, target)
 
         elif isinstance(target, TargetWaypointRadius):
             return [("waypoint", target.waypoint_label)]
 
         elif isinstance(target, TargetAllNearWaypoint):
             wp = self._get_waypoint(target.waypoint_label)
-            if wp:
-                return [("node", nid) for nid in geo.nodes_near_waypoint(wp, target.meters, located)]
+            result = [("node", nid) for nid in geo.nodes_near_waypoint(wp, target.meters, located)] if wp else []
+            return self._apply_random_n(result, target)
 
         elif isinstance(target, TargetAllNearNode):
             node_def = self._get_node_def(target.node_label)
             if node_def:
-                nearby = geo.nodes_near_node(node_def.node_id, target.meters, located)
-                return [("node", nid) for nid in nearby]
+                result = [("node", nid) for nid in geo.nodes_near_node(node_def.node_id, target.meters, located)]
+                return self._apply_random_n(result, target)
 
         elif isinstance(target, TargetGroup):
             kind = self._group_kind.get(target.group_label, "node")
-            return [(kind, m) for m in self.state.get_group_members(target.group_label)]
+            result = [(kind, m) for m in self.state.get_group_members(target.group_label)]
+            return self._apply_random_n(result, target)
 
         return []
 

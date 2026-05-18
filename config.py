@@ -155,23 +155,27 @@ class TargetWaypointRadius:
 @dataclass
 class TargetAllInZone:
     zone_label: str
+    random_n: int | None = None
 
 
 @dataclass
 class TargetAllWithFlag:
     flag_label: str
+    random_n: int | None = None
 
 
 @dataclass
 class TargetAllNearWaypoint:
     waypoint_label: str
     meters: float
+    random_n: int | None = None
 
 
 @dataclass
 class TargetAllNearNode:
     node_label: str
     meters: float
+    random_n: int | None = None
 
 
 @dataclass
@@ -182,6 +186,7 @@ class TargetChannel:
 @dataclass
 class TargetGroup:
     group_label: str
+    random_n: int | None = None
 
 
 Target = (
@@ -367,17 +372,17 @@ def _parse_target(raw: dict) -> Target:
         r = raw["to_waypoint_radius"]
         return TargetWaypointRadius(r["waypoint"], float(r["meters"]))
     if "to_all_in_zone" in raw:
-        return TargetAllInZone(raw["to_all_in_zone"])
+        return TargetAllInZone(raw["to_all_in_zone"], random_n=raw.get("random_n"))
     if "to_all_with_flag" in raw:
-        return TargetAllWithFlag(raw["to_all_with_flag"])
+        return TargetAllWithFlag(raw["to_all_with_flag"], random_n=raw.get("random_n"))
     if "to_all_near_waypoint" in raw:
         r = raw["to_all_near_waypoint"]
-        return TargetAllNearWaypoint(r["waypoint"], float(r["meters"]))
+        return TargetAllNearWaypoint(r["waypoint"], float(r["meters"]), random_n=raw.get("random_n"))
     if "to_all_near_node" in raw:
         r = raw["to_all_near_node"]
-        return TargetAllNearNode(r["node"], float(r["meters"]))
+        return TargetAllNearNode(r["node"], float(r["meters"]), random_n=raw.get("random_n"))
     if "to_group" in raw:
-        return TargetGroup(raw["to_group"])
+        return TargetGroup(raw["to_group"], random_n=raw.get("random_n"))
     raise ConfigError(f"Unrecognised target in response: {raw}")
 
 
@@ -753,7 +758,10 @@ def _validate_target(
     zone_labels, waypoint_labels, flag_labels, node_labels,
     channel_labels, group_labels,
     ctx: str,
-):
+) -> None:
+    random_n = getattr(target, "random_n", None)
+    if random_n is not None and (not isinstance(random_n, int) or isinstance(random_n, bool) or random_n < 1):
+        raise ConfigError(f"{ctx}: random_n must be a positive integer")
     if isinstance(target, TargetZone):
         if target.zone_label not in zone_labels:
             raise ConfigError(f"{ctx}: zone {target.zone_label!r} not defined")
