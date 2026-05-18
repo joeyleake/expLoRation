@@ -111,7 +111,7 @@ class TimedTrigger:
 class CommandTrigger:
     kind: str             # dm | channel
     message_label: str
-    zone_label: str
+    zone_label: str | None = None
     channel_label: str | None = None  # required when kind == channel
 
 
@@ -440,7 +440,7 @@ def _parse_trigger(raw: dict) -> ProximityTrigger | TimedTrigger | CommandTrigge
         return CommandTrigger(
             kind=kind,
             message_label=raw["message_label"],
-            zone_label=raw["zone_label"],
+            zone_label=raw.get("zone_label"),
             channel_label=raw.get("channel_label"),
         )
     if kind == "variable_threshold":
@@ -628,7 +628,8 @@ def _validate(cfg: GameConfig) -> None:
 
         elif isinstance(t, CommandTrigger):
             _check_label(t.message_label, message_labels, f"{ctx} trigger")
-            _check_label(t.zone_label, zone_labels, f"{ctx} trigger")
+            if t.zone_label is not None:
+                _check_label(t.zone_label, zone_labels, f"{ctx} trigger")
             if t.kind == "channel":
                 if t.channel_label is None:
                     raise ConfigError(f"{ctx} channel trigger requires 'channel_label'")

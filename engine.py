@@ -314,13 +314,16 @@ class Engine:
                 expected_idx = self.channel_index_map.get(t.channel_label)
                 if expected_idx is None or ctx.channel_idx != expected_idx:
                     return False
-            zone = self._get_zone(t.zone_label)
-            if zone is None:
-                return False
-            node_loc = self.state.get_node_location(ctx.node_id)
-            if node_loc is None:
-                return False
-            return geo.point_in_triangle(node_loc, *zone.points)
+            if t.zone_label is not None:
+                zone = self._get_zone(t.zone_label)
+                if zone is None:
+                    return False
+                node_loc = self.state.get_node_location(ctx.node_id)
+                if node_loc is None:
+                    return False
+                if not geo.point_in_triangle(node_loc, *zone.points):
+                    return False
+            return True
 
         elif isinstance(t, VariableThresholdTrigger):
             var_def = self._mutable_var_defs.get(t.variable_label)
