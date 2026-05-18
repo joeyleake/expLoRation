@@ -64,6 +64,9 @@ CREATE TABLE IF NOT EXISTS node_groups (
     added_at    TEXT NOT NULL,
     PRIMARY KEY (group_label, member_id)
 );
+
+CREATE INDEX IF NOT EXISTS idx_node_flags_label ON node_flags(flag_label);
+CREATE INDEX IF NOT EXISTS idx_node_locations_id ON node_locations(node_id);
 """
 
 _FLAG_TABLE = {
@@ -91,6 +94,7 @@ class GameState:
 
     def init_schema(self) -> None:
         with self._lock:
+            self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.executescript(_SCHEMA)
             try:
                 self._conn.execute("ALTER TABLE event_state ADD COLUMN disabled INTEGER NOT NULL DEFAULT 0")
