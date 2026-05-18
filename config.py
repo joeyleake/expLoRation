@@ -64,6 +64,16 @@ class GroupDef:
 
 
 @dataclass
+class MutableVariableDef:
+    label: str
+    type: str               # "integer" | "float" | "string"
+    scope: str              # "global" | "node"
+    initial: int | float | str
+    min: int | float | None = None
+    max: int | float | None = None
+
+
+@dataclass
 class Variable:
     label: str
     scope: str            # global | node | zone | waypoint | event
@@ -103,6 +113,13 @@ class CommandTrigger:
     message_label: str
     zone_label: str
     channel_label: str | None = None  # required when kind == channel
+
+
+@dataclass
+class VariableThresholdTrigger:
+    variable_label: str
+    operator: str         # "lt" | "lte" | "eq" | "neq" | "gte" | "gt"
+    value: int | float | str
 
 
 # ---------------------------------------------------------------------------
@@ -238,6 +255,20 @@ class RemoveFromGroupResponse:
 
 
 @dataclass
+class SetVariableResponse:
+    variable_label: str
+    value: int | float | str
+    target: Target | None = None
+
+
+@dataclass
+class IncrementVariableResponse:
+    variable_label: str
+    amount: int | float
+    target: Target | None = None
+
+
+@dataclass
 class RandomOption:
     weight: float
     responses: list   # list[Response] — unparameterized to avoid forward-ref issues
@@ -258,6 +289,8 @@ Response = (
     | EnableEventResponse
     | AddToGroupResponse
     | RemoveFromGroupResponse
+    | SetVariableResponse
+    | IncrementVariableResponse
     | RandomOptionsResponse
 )
 
@@ -286,7 +319,7 @@ class EventException:
 @dataclass
 class Event:
     label: str
-    trigger: ProximityTrigger | TimedTrigger | CommandTrigger
+    trigger: ProximityTrigger | TimedTrigger | CommandTrigger | VariableThresholdTrigger
     responses: list[Response]
     exceptions: list[EventException] = field(default_factory=list)
     max_triggers: int | None = None
@@ -311,6 +344,7 @@ class GameConfig:
     nodes: list[NodeDef] = field(default_factory=list)
     groups: list[GroupDef] = field(default_factory=list)
     variables: list[Variable] = field(default_factory=list)
+    mutable_variables: list[MutableVariableDef] = field(default_factory=list)
     events: list[Event] = field(default_factory=list)
 
 
@@ -367,6 +401,17 @@ def _parse_response(raw: dict) -> Response:
         return AddToGroupResponse(raw["group_label"], _parse_target(raw))
     if kind == "remove_from_group":
         return RemoveFromGroupResponse(raw["group_label"], _parse_target(raw))
+    _TARGET_KEYS = frozenset({
+        "to_triggering_node", "to_node", "to_zone", "to_channel", "to_flag",
+        "to_waypoint_radius", "to_all_in_zone", "to_all_with_flag",
+        "to_all_near_waypoint", "to_all_near_node", "to_group",
+    })
+    if kind == "set_variable":
+        tgt = _parse_target(raw) if _TARGET_KEYS & raw.keys() else None
+        return SetVariableResponse(variable_label=raw["variable_label"], value=raw["value"], target=tgt)
+    if kind == "increment_variable":
+        tgt = _parse_target(raw) if _TARGET_KEYS & raw.keys() else None
+        return IncrementVariableResponse(variable_label=raw["variable_label"], amount=raw["amount"], target=tgt)
     if kind == "random_options":
         options = []
         for opt in raw.get("options", []):
@@ -397,6 +442,12 @@ def _parse_trigger(raw: dict) -> ProximityTrigger | TimedTrigger | CommandTrigge
             message_label=raw["message_label"],
             zone_label=raw["zone_label"],
             channel_label=raw.get("channel_label"),
+        )
+    if kind == "variable_threshold":
+        return VariableThresholdTrigger(
+            variable_label=raw["variable"],
+            operator=raw["operator"],
+            value=raw["value"],
         )
     raise ConfigError(f"Unknown trigger type: {kind!r}")
 
@@ -489,6 +540,31 @@ def _validate_response(
 # Validation
 # ---------------------------------------------------------------------------
 
+def _validate_mutable_response(resp, mutable_var_def_map: dict, ctx: str) -> None:
+    if isinstance(resp, SetVariableResponse):
+        if resp.variable_label not in mutable_var_def_map:
+            raise ConfigError(f"{ctx}: set_variable: {resp.variable_label!r} not in mutable_variables")
+        mv = mutable_var_def_map[resp.variable_label]
+        if mv.scope == "node" and resp.target is None:
+            raise ConfigError(f"{ctx}: set_variable on node-scoped variable requires a target")
+        if mv.scope == "global" and resp.target is not None:
+            raise ConfigError(f"{ctx}: set_variable on global variable must not have a target")
+    elif isinstance(resp, IncrementVariableResponse):
+        if resp.variable_label not in mutable_var_def_map:
+            raise ConfigError(f"{ctx}: increment_variable: {resp.variable_label!r} not in mutable_variables")
+        mv = mutable_var_def_map[resp.variable_label]
+        if mv.type == "string":
+            raise ConfigError(f"{ctx}: increment_variable not valid for string-type variables")
+        if mv.scope == "node" and resp.target is None:
+            raise ConfigError(f"{ctx}: increment_variable on node-scoped variable requires a target")
+        if mv.scope == "global" and resp.target is not None:
+            raise ConfigError(f"{ctx}: increment_variable on global variable must not have a target")
+    elif isinstance(resp, RandomOptionsResponse):
+        for i, opt in enumerate(resp.options):
+            for nested in opt.responses:
+                _validate_mutable_response(nested, mutable_var_def_map, f"{ctx} random_options[{i}]")
+
+
 def _validate(cfg: GameConfig) -> None:
     channel_labels = {c.label for c in cfg.channels}
     zone_labels = {z.label for z in cfg.zones}
@@ -499,6 +575,33 @@ def _validate(cfg: GameConfig) -> None:
     event_labels = {e.label for e in cfg.events}
     group_labels = {g.label for g in cfg.groups}
     group_kind = {g.label: g.kind for g in cfg.groups}
+    mutable_var_labels = {mv.label for mv in cfg.mutable_variables}
+    mutable_var_def_map = {mv.label: mv for mv in cfg.mutable_variables}
+
+    variable_labels = {v.label for v in cfg.variables}
+    for label in mutable_var_labels & variable_labels:
+        raise ConfigError(f"Label {label!r} defined in both variables and mutable_variables")
+
+    _MV_TYPES = ("integer", "float", "string")
+    _MV_SCOPES = ("global", "node")
+    for mv in cfg.mutable_variables:
+        mvctx = f"MutableVariable {mv.label!r}"
+        if mv.type not in _MV_TYPES:
+            raise ConfigError(f"{mvctx}: type must be one of {_MV_TYPES}")
+        if mv.scope not in _MV_SCOPES:
+            raise ConfigError(f"{mvctx}: scope must be one of {_MV_SCOPES}")
+        if mv.type == "string" and (mv.min is not None or mv.max is not None):
+            raise ConfigError(f"{mvctx}: min/max not valid for string type")
+        if mv.type == "integer" and (not isinstance(mv.initial, int) or isinstance(mv.initial, bool)):
+            raise ConfigError(f"{mvctx}: initial must be an integer")
+        elif mv.type == "float" and (not isinstance(mv.initial, (int, float)) or isinstance(mv.initial, bool)):
+            raise ConfigError(f"{mvctx}: initial must be numeric")
+        if mv.min is not None and mv.max is not None and mv.min > mv.max:
+            raise ConfigError(f"{mvctx}: min must be <= max")
+        if mv.min is not None and mv.initial < mv.min:
+            raise ConfigError(f"{mvctx}: initial must be >= min")
+        if mv.max is not None and mv.initial > mv.max:
+            raise ConfigError(f"{mvctx}: initial must be <= max")
 
     _GROUP_KINDS = ("node", "zone", "waypoint")
     _member_pool = {"node": node_labels, "zone": zone_labels, "waypoint": waypoint_labels}
@@ -531,12 +634,22 @@ def _validate(cfg: GameConfig) -> None:
                     raise ConfigError(f"{ctx} channel trigger requires 'channel_label'")
                 _check_label(t.channel_label, channel_labels, f"{ctx} trigger")
 
+        elif isinstance(t, VariableThresholdTrigger):
+            _THRESHOLD_OPS = ("lt", "lte", "eq", "neq", "gte", "gt")
+            if t.variable_label not in mutable_var_labels:
+                raise ConfigError(f"{ctx} trigger: variable {t.variable_label!r} not in mutable_variables")
+            if t.operator not in _THRESHOLD_OPS:
+                raise ConfigError(f"{ctx} trigger: operator must be one of {_THRESHOLD_OPS}")
+            if mutable_var_def_map[t.variable_label].type == "string" and t.operator not in ("eq", "neq"):
+                raise ConfigError(f"{ctx} trigger: string variables only support eq/neq operators")
+
         for resp in event.responses:
             _validate_response(
                 resp, message_labels, flag_labels, event_labels,
                 zone_labels, waypoint_labels, node_labels, channel_labels, group_labels,
                 f"{ctx} response",
             )
+            _validate_mutable_response(resp, mutable_var_def_map, f"{ctx} response")
 
         for exc in event.exceptions:
             if exc.kind == "random_skip":
@@ -576,8 +689,6 @@ def _validate(cfg: GameConfig) -> None:
     for node in cfg.nodes:
         for fl in node.initial_flags:
             _check_label(fl, flag_labels, f"Node {node.label!r} initial_flags")
-
-    variable_labels = {v.label for v in cfg.variables}
 
     for var in cfg.variables:
         vctx = f"Variable {var.label!r}"
@@ -626,10 +737,11 @@ def _validate(cfg: GameConfig) -> None:
         else:
             raise ConfigError(f"{vctx}: unknown tracks value {var.tracks!r}")
 
+    all_variable_labels = variable_labels | mutable_var_labels
     _VAR_TOKEN_RE = re.compile(r'\{(\w+)\}')
     for msg in cfg.messages:
         for token in _VAR_TOKEN_RE.findall(msg.text):
-            if token not in variable_labels:
+            if token not in all_variable_labels:
                 raise ConfigError(
                     f"Message {msg.label!r}: interpolation token '{{{token}}}' not defined in variables"
                 )
@@ -725,6 +837,17 @@ def load_config(path: str) -> GameConfig:
             for g in raw.get("groups", [])
         ],
         variables=[_parse_variable(v) for v in raw.get("variables", [])],
+        mutable_variables=[
+            MutableVariableDef(
+                label=mv["label"],
+                type=mv["type"],
+                scope=mv["scope"],
+                initial=mv["initial"],
+                min=mv.get("min"),
+                max=mv.get("max"),
+            )
+            for mv in raw.get("mutable_variables", [])
+        ],
         events=[_parse_event(e) for e in raw.get("events", [])],
     )
 

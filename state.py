@@ -65,8 +65,19 @@ CREATE TABLE IF NOT EXISTS node_groups (
     PRIMARY KEY (group_label, member_id)
 );
 
+CREATE TABLE IF NOT EXISTS mutable_variables (
+    label      TEXT NOT NULL,
+    node_id    TEXT NOT NULL DEFAULT '',
+    value_int  INTEGER,
+    value_real REAL,
+    value_text TEXT,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (label, node_id)
+);
+
 CREATE INDEX IF NOT EXISTS idx_node_flags_label ON node_flags(flag_label);
 CREATE INDEX IF NOT EXISTS idx_node_locations_id ON node_locations(node_id);
+CREATE INDEX IF NOT EXISTS idx_mutable_variables_label ON mutable_variables(label);
 """
 
 _FLAG_TABLE = {
@@ -245,6 +256,59 @@ class GameState:
                 self._conn.execute(
                     f"DELETE FROM {table} WHERE expires_at IS NOT NULL AND expires_at <= ?",
                     (now,),
+                )
+            self._conn.commit()
+
+    # ------------------------------------------------------------------
+    # Mutable variables
+    # ------------------------------------------------------------------
+
+    def get_mutable_variable(self, label: str, node_id: str = '') -> int | float | str | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT value_int, value_real, value_text FROM mutable_variables "
+                "WHERE label=? AND node_id=?",
+                (label, node_id),
+            ).fetchone()
+            if row is None:
+                return None
+            if row["value_int"] is not None:
+                return row["value_int"]
+            if row["value_real"] is not None:
+                return row["value_real"]
+            return row["value_text"]
+
+    def set_mutable_variable(self, label: str, value: int | float | str, node_id: str = '') -> None:
+        vi = value if isinstance(value, int) and not isinstance(value, bool) else None
+        vr = value if isinstance(value, float) else None
+        vt = value if isinstance(value, str) else None
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO mutable_variables(label, node_id, value_int, value_real, value_text, updated_at)
+                VALUES(?, ?, ?, ?, ?, ?)
+                ON CONFLICT(label, node_id) DO UPDATE SET
+                    value_int=excluded.value_int, value_real=excluded.value_real,
+                    value_text=excluded.value_text, updated_at=excluded.updated_at
+                """,
+                (label, node_id, vi, vr, vt, _now_iso()),
+            )
+            self._conn.commit()
+
+    def init_mutable_variables(self, config: "GameConfig") -> None:
+        with self._lock:
+            for mv in config.mutable_variables:
+                value = mv.initial
+                vi = value if isinstance(value, int) and not isinstance(value, bool) else None
+                vr = value if isinstance(value, float) else None
+                vt = value if isinstance(value, str) else None
+                self._conn.execute(
+                    """
+                    INSERT OR IGNORE INTO mutable_variables
+                        (label, node_id, value_int, value_real, value_text, updated_at)
+                    VALUES(?, '', ?, ?, ?, ?)
+                    """,
+                    (mv.label, vi, vr, vt, _now_iso()),
                 )
             self._conn.commit()
 

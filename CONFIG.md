@@ -11,15 +11,16 @@ missing or misused.
 ## Top-level structure
 
 ```yaml
-channels:   [ ... ]
-zones:      [ ... ]
-waypoints:  [ ... ]
-messages:   [ ... ]
-flags:      [ ... ]
-nodes:      [ ... ]
-groups:     [ ... ]
-variables:  [ ... ]
-events:     [ ... ]
+channels:            [ ... ]
+zones:               [ ... ]
+waypoints:           [ ... ]
+messages:            [ ... ]
+flags:               [ ... ]
+nodes:               [ ... ]
+groups:              [ ... ]
+variables:           [ ... ]
+mutable_variables:   [ ... ]
+events:              [ ... ]
 ```
 
 All sections are optional; omitting a section is the same as providing an empty
@@ -419,6 +420,229 @@ Supports the same optional `exclude_flag` field.
   tracks: nearest_node_name
   target: start_zone
   exclude_flag: homeowner
+```
+
+---
+
+## Mutable Variables
+
+Mutable variables are writable, typed, persisted values that event responses can modify at
+runtime. They complement the read-only computed `variables:` (which track counts, distances,
+and other derived state) — mutable variables hold values that the game logic actively changes,
+like HP, score counters, or a phase string.
+
+All mutable variable state lives in SQLite and survives bot restarts. On startup the bot
+inserts an initial row for each variable using `INSERT OR IGNORE`, so restarting mid-game
+does **not** reset values to their initial defaults.
+
+```yaml
+mutable_variables:
+  - label: hp
+    type: integer
+    scope: node
+    initial: 100
+    min: 0
+    max: 100
+
+  - label: score
+    type: integer
+    scope: global
+    initial: 0
+    min: 0
+
+  - label: game_phase
+    type: string
+    scope: global
+    initial: waiting
+```
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `label` | string | yes | Unique name used in responses, triggers, and message interpolation. Must not duplicate any label in `variables:` |
+| `type` | string | yes | `integer`, `float`, or `string` |
+| `scope` | string | yes | `global` (one value shared across all nodes) or `node` (separate value per node) |
+| `initial` | any | yes | Starting value. Must be type-compatible (int for integer, numeric for float, string for string) |
+| `min` | number | no | Lower bound, enforced on every write. Numeric types only |
+| `max` | number | no | Upper bound, enforced on every write. Numeric types only |
+
+**Notes:**
+- `min`/`max` are enforced via clamping on every write — a value can never go outside the
+  declared bounds regardless of the increment amount.
+- Labels must be unique across both `variables:` and `mutable_variables:` since they share
+  the `{label}` interpolation namespace in messages.
+- For `scope: node`, per-node rows are created on first write. Reading before the first write
+  returns the `initial` value.
+
+### Modifying mutable variables: response types
+
+#### `set_variable`
+
+Sets a mutable variable to a static value.
+
+```yaml
+responses:
+  - type: set_variable
+    variable_label: game_phase
+    value: active            # global-scoped: no target
+
+  - type: set_variable
+    variable_label: hp
+    value: 100
+    to_triggering_node: true  # node-scoped: target required
+```
+
+| Field | Required | Description |
+|---|---|---|
+| `variable_label` | yes | Label of a `mutable_variables:` entry |
+| `value` | yes | Value to set. Must be compatible with the variable's `type` |
+| target | node-scoped only | Any node-resolving target (`to_triggering_node`, `to_node`, `to_all_in_zone`, etc.). Must be omitted for `scope: global` |
+
+#### `increment_variable`
+
+Adds an amount to a numeric mutable variable (use a negative amount to decrement). The result
+is clamped to `[min, max]` if bounds are defined. Not valid for `type: string`.
+
+```yaml
+responses:
+  - type: increment_variable
+    variable_label: score
+    amount: 10              # global-scoped: no target
+
+  - type: increment_variable
+    variable_label: hp
+    amount: -25
+    to_triggering_node: true  # node-scoped: target required
+```
+
+| Field | Required | Description |
+|---|---|---|
+| `variable_label` | yes | Label of a numeric (`integer` or `float`) `mutable_variables:` entry |
+| `amount` | yes | Number to add (positive or negative) |
+| target | node-scoped only | Any node-resolving target. Must be omitted for `scope: global` |
+
+### Triggering on a value: `variable_threshold`
+
+Fires when a mutable variable satisfies a comparison against a threshold value. This trigger
+is **level-triggered**: it fires whenever the condition is true on each evaluation cycle, not
+only when the value first crosses the threshold. Use `reset_mins` to prevent repeat firing.
+
+- **Global-scoped** variables: evaluated on every periodic tick (`--periodic` interval).
+- **Node-scoped** variables: evaluated on every position update for that node.
+
+```yaml
+events:
+  - label: elimination
+    trigger:
+      type: variable_threshold
+      variable: hp           # label of the mutable variable (key is "variable:", not "variable_label:")
+      operator: lte
+      value: 0
+    responses:
+      - type: add_flag
+        flag_label: eliminated
+        to_triggering_node: true
+    exceptions:
+      - kind: node_has_flag
+        flag: eliminated
+    reset_mins: 1
+```
+
+| Field | Required | Description |
+|---|---|---|
+| `variable` | yes | Label of a `mutable_variables:` entry |
+| `operator` | yes | Comparison operator (see table below) |
+| `value` | yes | Threshold to compare against. Must be type-compatible with the variable |
+
+**Operators:**
+
+| Operator | Meaning |
+|---|---|
+| `lt` | less than |
+| `lte` | less than or equal |
+| `eq` | equal |
+| `neq` | not equal |
+| `gte` | greater than or equal |
+| `gt` | greater than |
+
+`lt`, `lte`, `gte`, `gt` are only valid for numeric types (`integer`, `float`). String variables
+support only `eq` and `neq`.
+
+### Interpolating mutable variables in messages
+
+Mutable variable labels can be used in message text with the same `{label}` syntax as computed
+variables:
+
+```yaml
+messages:
+  - label: status
+    text: "HP: {hp} | Score: {score} | Phase: {game_phase}"
+```
+
+For `scope: node` variables, the value interpolated is the triggering node's value.
+
+### Worked example: HP system
+
+```yaml
+mutable_variables:
+  - label: hp
+    type: integer
+    scope: node
+    initial: 100
+    min: 0
+    max: 100
+
+flags:
+  - label: eliminated
+
+messages:
+  - label: damage_notice
+    text: "You took a hit! HP remaining: {hp}"
+  - label: eliminated_notice
+    text: "You have been eliminated."
+
+zones:
+  - label: danger_zone
+    points:
+      - [37.77, -122.42]
+      - [37.78, -122.42]
+      - [37.77, -122.41]
+
+events:
+  # Deal 25 damage on zone entry (once per minute)
+  - label: take_damage
+    trigger:
+      type: enters_zone
+      target: danger_zone
+    responses:
+      - type: increment_variable
+        variable_label: hp
+        amount: -25
+        to_triggering_node: true
+      - type: send_message
+        message_label: damage_notice
+        to_triggering_node: true
+    exceptions:
+      - kind: node_has_flag
+        flag: eliminated
+    reset_mins: 1
+
+  # Eliminate when HP reaches zero (checked on every position update)
+  - label: elimination
+    trigger:
+      type: variable_threshold
+      variable: hp
+      operator: lte
+      value: 0
+    responses:
+      - type: add_flag
+        flag_label: eliminated
+        to_triggering_node: true
+      - type: send_message
+        message_label: eliminated_notice
+        to_triggering_node: true
+    exceptions:
+      - kind: node_has_flag
+        flag: eliminated
 ```
 
 ---
