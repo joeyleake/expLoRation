@@ -11,15 +11,17 @@ from datetime import datetime, timezone, timedelta
 from typing import Any
 
 from config import (
-    GameConfig, Event, Variable,
-    ProximityTrigger, TimedTrigger, CommandTrigger,
+    GameConfig, Event, Variable, MutableVariableDef,
+    ProximityTrigger, TimedTrigger, CommandTrigger, VariableThresholdTrigger,
     SendMessageResponse, AddFlagResponse, RemoveFlagResponse,
     RequestLocationResponse, SetEventTriggersResponse,
     DisableEventResponse, EnableEventResponse,
+    AddToGroupResponse, RemoveFromGroupResponse,
+    SetVariableResponse, IncrementVariableResponse,
     RandomOptionsResponse,
     TargetTriggeringNode, TargetNode, TargetZone, TargetFlag,
     TargetWaypointRadius, TargetAllInZone, TargetAllWithFlag,
-    TargetAllNearWaypoint, TargetAllNearNode, TargetChannel,
+    TargetAllNearWaypoint, TargetAllNearNode, TargetChannel, TargetGroup,
     EventException,
 )
 from state import GameState
@@ -92,6 +94,10 @@ class Engine:
         self.state = state
         self.interface = interface
         self.send_delay = send_delay
+        self._group_kind: dict[str, str] = {g.label: g.kind for g in config.groups}
+        self._mutable_var_defs: dict[str, MutableVariableDef] = {
+            mv.label: mv for mv in config.mutable_variables
+        }
 
         # populated by bot.py on connection
         self.channel_index_map: dict[str, int] = {}   # channel_label → device index
@@ -138,6 +144,12 @@ class Engine:
             if isinstance(event.trigger, ProximityTrigger) and event.trigger.kind != "in_zone_on_start":
                 if self._should_fire(event, ctx):
                     self._fire_event(event, ctx)
+        for event in self.config.events:
+            if isinstance(event.trigger, VariableThresholdTrigger):
+                var_def = self._mutable_var_defs.get(event.trigger.variable_label)
+                if var_def and var_def.scope == "node":
+                    if self._should_fire(event, ctx):
+                        self._fire_event(event, ctx)
 
     def handle_message(
         self, node_id: str, text: str, is_dm: bool, channel_idx: int
@@ -165,6 +177,13 @@ class Engine:
 
             if event.auto_recur and event.recur_mins is not None:
                 self._maybe_auto_recur(event)
+
+        for event in self.config.events:
+            if isinstance(event.trigger, VariableThresholdTrigger):
+                var_def = self._mutable_var_defs.get(event.trigger.variable_label)
+                if var_def and var_def.scope == "global":
+                    if self._should_fire(event, ctx):
+                        self._fire_event(event, ctx)
 
     # ------------------------------------------------------------------
     # Trigger evaluation
@@ -303,7 +322,31 @@ class Engine:
                 return False
             return geo.point_in_triangle(node_loc, *zone.points)
 
+        elif isinstance(t, VariableThresholdTrigger):
+            var_def = self._mutable_var_defs.get(t.variable_label)
+            if var_def is None:
+                return False
+            if var_def.scope == "node":
+                if not isinstance(ctx, (NodeContext, MessageContext)):
+                    return False
+                raw = self.state.get_mutable_variable(t.variable_label, ctx.node_id)
+            else:
+                raw = self.state.get_mutable_variable(t.variable_label)
+            if raw is None:
+                raw = var_def.initial
+            return self._evaluate_threshold(raw, t.operator, t.value)
+
         return False
+
+    @staticmethod
+    def _evaluate_threshold(current, operator: str, threshold) -> bool:
+        ops = {
+            "lt": lambda a, b: a < b, "lte": lambda a, b: a <= b,
+            "eq": lambda a, b: a == b, "neq": lambda a, b: a != b,
+            "gte": lambda a, b: a >= b, "gt": lambda a, b: a > b,
+        }
+        fn = ops.get(operator)
+        return fn(current, threshold) if fn else False
 
     def _check_exceptions(self, event: Event, ctx: Context) -> bool:
         node_id = ctx.node_id if isinstance(ctx, (NodeContext, MessageContext)) else None
@@ -338,6 +381,21 @@ class Engine:
                 return False
             has = self.state.has_flag("waypoint", exc.target, exc.flag)
             return has if kind == "waypoint_has_flag" else not has
+        if kind in ("node_in_group", "node_not_in_group"):
+            if node_id is None or exc.group is None:
+                return False
+            result = self.state.is_in_group(exc.group, node_id)
+            return result if kind == "node_in_group" else not result
+        if kind in ("zone_in_group", "zone_not_in_group"):
+            if exc.target is None or exc.group is None:
+                return False
+            result = self.state.is_in_group(exc.group, exc.target)
+            return result if kind == "zone_in_group" else not result
+        if kind in ("waypoint_in_group", "waypoint_not_in_group"):
+            if exc.target is None or exc.group is None:
+                return False
+            result = self.state.is_in_group(exc.group, exc.target)
+            return result if kind == "waypoint_in_group" else not result
         return False
 
     # ------------------------------------------------------------------
@@ -418,6 +476,43 @@ class Engine:
             self.state.set_event_disabled(resp.event_label, False)
             log.info("Enabled event %r", resp.event_label)
 
+        elif isinstance(resp, (AddToGroupResponse, RemoveFromGroupResponse)):
+            adding = isinstance(resp, AddToGroupResponse)
+            op = "add_to_group" if adding else "remove_from_group"
+            kind = self._group_kind.get(resp.group_label, "node")
+            if kind == "node":
+                members = self._resolve_node_targets(resp.target, node_id)
+            elif kind == "zone":
+                members = [resp.target.zone_label] if isinstance(resp.target, TargetZone) else []
+            else:  # waypoint
+                members = [resp.target.waypoint_label] if hasattr(resp.target, "waypoint_label") else []
+            for member in members:
+                if adding:
+                    self.state.add_to_group(resp.group_label, member)
+                else:
+                    self.state.remove_from_group(resp.group_label, member)
+                log.info("%s %s → %s", op, resp.group_label, member)
+
+        elif isinstance(resp, SetVariableResponse):
+            var_def = self._mutable_var_defs.get(resp.variable_label)
+            if var_def is None:
+                return
+            if var_def.scope == "node":
+                for nid in self._resolve_node_targets(resp.target, node_id):
+                    self._set_variable(var_def, resp.value, nid)
+            else:
+                self._set_variable(var_def, resp.value)
+
+        elif isinstance(resp, IncrementVariableResponse):
+            var_def = self._mutable_var_defs.get(resp.variable_label)
+            if var_def is None:
+                return
+            if var_def.scope == "node":
+                for nid in self._resolve_node_targets(resp.target, node_id):
+                    self._increment_variable(var_def, resp.amount, nid)
+            else:
+                self._increment_variable(var_def, resp.amount)
+
         elif isinstance(resp, RandomOptionsResponse):
             weights = [opt.weight for opt in resp.options]
             chosen = random.choices(resp.options, weights=weights, k=1)[0]
@@ -431,6 +526,34 @@ class Engine:
     # ------------------------------------------------------------------
     # Target resolution
     # ------------------------------------------------------------------
+
+    def _set_variable(self, var_def: MutableVariableDef, value, node_id: str = '') -> None:
+        value = self._coerce_value(var_def, value)
+        value = self._clamp_value(var_def, value)
+        self.state.set_mutable_variable(var_def.label, value, node_id)
+        log.info("set_variable %r[%s] = %r", var_def.label, node_id or 'global', value)
+
+    def _increment_variable(self, var_def: MutableVariableDef, amount, node_id: str = '') -> None:
+        current = self.state.get_mutable_variable(var_def.label, node_id)
+        if current is None:
+            current = var_def.initial
+        new_value = self._clamp_value(var_def, current + amount)
+        self.state.set_mutable_variable(var_def.label, new_value, node_id)
+        log.info("increment_variable %r[%s] %+g → %r", var_def.label, node_id or 'global', amount, new_value)
+
+    def _coerce_value(self, var_def: MutableVariableDef, value):
+        if var_def.type == "integer":
+            return int(value)
+        elif var_def.type == "float":
+            return float(value)
+        return str(value)
+
+    def _clamp_value(self, var_def: MutableVariableDef, value):
+        if var_def.min is not None:
+            value = max(var_def.min, value)
+        if var_def.max is not None:
+            value = min(var_def.max, value)
+        return value
 
     def _resolve_node_targets(self, target, triggering_node_id: str | None) -> list[str]:
         located = self.state.get_all_located_nodes()
@@ -460,6 +583,10 @@ class Engine:
             if node_def is None:
                 return []
             return geo.nodes_near_node(node_def.node_id, target.meters, located)
+
+        if isinstance(target, TargetGroup):
+            # Only valid for node-kind groups
+            return self.state.get_group_members(target.group_label)
 
         return []
 
@@ -501,6 +628,10 @@ class Engine:
             if node_def:
                 nearby = geo.nodes_near_node(node_def.node_id, target.meters, located)
                 return [("node", nid) for nid in nearby]
+
+        elif isinstance(target, TargetGroup):
+            kind = self._group_kind.get(target.group_label, "node")
+            return [(kind, m) for m in self.state.get_group_members(target.group_label)]
 
         return []
 
@@ -550,10 +681,13 @@ class Engine:
         def replace(m: re.Match) -> str:
             label = m.group(1)
             var = self._get_variable(label)
-            if var is None:
-                log.warning("Unknown variable %r referenced in message", label)
-                return "[unknown]"
-            return self._resolve_variable(var, triggering_node_id)
+            if var is not None:
+                return self._resolve_variable(var, triggering_node_id)
+            mv_def = self._mutable_var_defs.get(label)
+            if mv_def is not None:
+                return self._resolve_mutable_variable(mv_def, triggering_node_id)
+            log.warning("Unknown variable %r referenced in message", label)
+            return "[unknown]"
         return _VAR_RE.sub(replace, text)
 
     def _resolve_variable(self, var: Variable, triggering_node_id: str | None) -> str:
@@ -577,6 +711,9 @@ class Engine:
 
         if var.tracks == "flag_count":
             return str(len(self.state.get_nodes_with_flag(var.target)))
+
+        if var.tracks == "group_count":
+            return str(len(self.state.get_group_members(var.target)))
 
         if var.tracks == "waypoint_node_count":
             wp = self._get_waypoint(var.target)
@@ -649,6 +786,17 @@ class Engine:
             return name or nearest_id
 
         return "[unknown]"
+
+    def _resolve_mutable_variable(self, var_def: MutableVariableDef, triggering_node_id: str | None) -> str:
+        if var_def.scope == "node":
+            if triggering_node_id is None:
+                return "[no node context]"
+            raw = self.state.get_mutable_variable(var_def.label, triggering_node_id)
+        else:
+            raw = self.state.get_mutable_variable(var_def.label)
+        if raw is None:
+            raw = var_def.initial
+        return str(raw)
 
     def _get_variable(self, label: str) -> Variable | None:
         return next((v for v in self.config.variables if v.label == label), None)

@@ -11,14 +11,16 @@ missing or misused.
 ## Top-level structure
 
 ```yaml
-channels:   [ ... ]
-zones:      [ ... ]
-waypoints:  [ ... ]
-messages:   [ ... ]
-flags:      [ ... ]
-nodes:      [ ... ]
-variables:  [ ... ]
-events:     [ ... ]
+channels:            [ ... ]
+zones:               [ ... ]
+waypoints:           [ ... ]
+messages:            [ ... ]
+flags:               [ ... ]
+nodes:               [ ... ]
+groups:              [ ... ]
+variables:           [ ... ]
+mutable_variables:   [ ... ]
+events:              [ ... ]
 ```
 
 All sections are optional; omitting a section is the same as providing an empty
@@ -189,6 +191,48 @@ nodes:
 
 ---
 
+## Groups
+
+Groups are named, typed collections of nodes, zones, or waypoints whose membership
+is stored in SQLite and managed at runtime via `add_to_group` / `remove_from_group`
+responses. They complement flags: flags track *state* ("has this node won?"), groups
+track *membership* ("which team does this node belong to?").
+
+```yaml
+groups:
+  - label: red_team
+    kind: node                # "node" | "zone" | "waypoint"
+    initial_members:          # optional — members seeded at startup
+      - node_alpha
+      - node_beta
+
+  - label: active_zones
+    kind: zone
+
+  - label: required_checkpoints
+    kind: waypoint
+    initial_members:
+      - checkpoint_1
+      - checkpoint_2
+```
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `label` | string | yes | Unique name used in responses, targets, and exceptions |
+| `kind` | string | yes | `node`, `zone`, or `waypoint` — the type of members this group holds |
+| `initial_members` | list of labels | no | Members of the appropriate kind seeded when the bot starts |
+
+**Notes:**
+- `initial_members` entries must be valid labels for the group's `kind` (node labels for
+  `kind: node`, zone labels for `kind: zone`, waypoint labels for `kind: waypoint`).
+- Startup seeding is additive and non-destructive: restarting the bot re-adds `initial_members`
+  but does **not** remove members that were added dynamically at runtime. Group membership is
+  persistent across restarts — it is not reset like expiring flags.
+- Groups with no `initial_members` start empty and are populated entirely by `add_to_group`
+  responses at runtime.
+
+---
+
 ## Variables
 
 Variables compute live values from engine state and are interpolated into
@@ -287,6 +331,17 @@ Returns the count of nodes currently carrying the target flag.
   target: player             # flag label
 ```
 
+#### `group_count` — members in a group
+
+Returns the count of current members in the target group. Works for groups of any kind.
+
+```yaml
+- label: red_team_size
+  scope: global
+  tracks: group_count
+  target: red_team           # group label
+```
+
 #### `waypoint_node_count` — nodes near a waypoint
 
 Returns the count of nodes within `meters` of the target waypoint.
@@ -365,6 +420,229 @@ Supports the same optional `exclude_flag` field.
   tracks: nearest_node_name
   target: start_zone
   exclude_flag: homeowner
+```
+
+---
+
+## Mutable Variables
+
+Mutable variables are writable, typed, persisted values that event responses can modify at
+runtime. They complement the read-only computed `variables:` (which track counts, distances,
+and other derived state) — mutable variables hold values that the game logic actively changes,
+like HP, score counters, or a phase string.
+
+All mutable variable state lives in SQLite and survives bot restarts. On startup the bot
+inserts an initial row for each variable using `INSERT OR IGNORE`, so restarting mid-game
+does **not** reset values to their initial defaults.
+
+```yaml
+mutable_variables:
+  - label: hp
+    type: integer
+    scope: node
+    initial: 100
+    min: 0
+    max: 100
+
+  - label: score
+    type: integer
+    scope: global
+    initial: 0
+    min: 0
+
+  - label: game_phase
+    type: string
+    scope: global
+    initial: waiting
+```
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `label` | string | yes | Unique name used in responses, triggers, and message interpolation. Must not duplicate any label in `variables:` |
+| `type` | string | yes | `integer`, `float`, or `string` |
+| `scope` | string | yes | `global` (one value shared across all nodes) or `node` (separate value per node) |
+| `initial` | any | yes | Starting value. Must be type-compatible (int for integer, numeric for float, string for string) |
+| `min` | number | no | Lower bound, enforced on every write. Numeric types only |
+| `max` | number | no | Upper bound, enforced on every write. Numeric types only |
+
+**Notes:**
+- `min`/`max` are enforced via clamping on every write — a value can never go outside the
+  declared bounds regardless of the increment amount.
+- Labels must be unique across both `variables:` and `mutable_variables:` since they share
+  the `{label}` interpolation namespace in messages.
+- For `scope: node`, per-node rows are created on first write. Reading before the first write
+  returns the `initial` value.
+
+### Modifying mutable variables: response types
+
+#### `set_variable`
+
+Sets a mutable variable to a static value.
+
+```yaml
+responses:
+  - type: set_variable
+    variable_label: game_phase
+    value: active            # global-scoped: no target
+
+  - type: set_variable
+    variable_label: hp
+    value: 100
+    to_triggering_node: true  # node-scoped: target required
+```
+
+| Field | Required | Description |
+|---|---|---|
+| `variable_label` | yes | Label of a `mutable_variables:` entry |
+| `value` | yes | Value to set. Must be compatible with the variable's `type` |
+| target | node-scoped only | Any node-resolving target (`to_triggering_node`, `to_node`, `to_all_in_zone`, etc.). Must be omitted for `scope: global` |
+
+#### `increment_variable`
+
+Adds an amount to a numeric mutable variable (use a negative amount to decrement). The result
+is clamped to `[min, max]` if bounds are defined. Not valid for `type: string`.
+
+```yaml
+responses:
+  - type: increment_variable
+    variable_label: score
+    amount: 10              # global-scoped: no target
+
+  - type: increment_variable
+    variable_label: hp
+    amount: -25
+    to_triggering_node: true  # node-scoped: target required
+```
+
+| Field | Required | Description |
+|---|---|---|
+| `variable_label` | yes | Label of a numeric (`integer` or `float`) `mutable_variables:` entry |
+| `amount` | yes | Number to add (positive or negative) |
+| target | node-scoped only | Any node-resolving target. Must be omitted for `scope: global` |
+
+### Triggering on a value: `variable_threshold`
+
+Fires when a mutable variable satisfies a comparison against a threshold value. This trigger
+is **level-triggered**: it fires whenever the condition is true on each evaluation cycle, not
+only when the value first crosses the threshold. Use `reset_mins` to prevent repeat firing.
+
+- **Global-scoped** variables: evaluated on every periodic tick (`--periodic` interval).
+- **Node-scoped** variables: evaluated on every position update for that node.
+
+```yaml
+events:
+  - label: elimination
+    trigger:
+      type: variable_threshold
+      variable: hp           # label of the mutable variable (key is "variable:", not "variable_label:")
+      operator: lte
+      value: 0
+    responses:
+      - type: add_flag
+        flag_label: eliminated
+        to_triggering_node: true
+    exceptions:
+      - kind: node_has_flag
+        flag: eliminated
+    reset_mins: 1
+```
+
+| Field | Required | Description |
+|---|---|---|
+| `variable` | yes | Label of a `mutable_variables:` entry |
+| `operator` | yes | Comparison operator (see table below) |
+| `value` | yes | Threshold to compare against. Must be type-compatible with the variable |
+
+**Operators:**
+
+| Operator | Meaning |
+|---|---|
+| `lt` | less than |
+| `lte` | less than or equal |
+| `eq` | equal |
+| `neq` | not equal |
+| `gte` | greater than or equal |
+| `gt` | greater than |
+
+`lt`, `lte`, `gte`, `gt` are only valid for numeric types (`integer`, `float`). String variables
+support only `eq` and `neq`.
+
+### Interpolating mutable variables in messages
+
+Mutable variable labels can be used in message text with the same `{label}` syntax as computed
+variables:
+
+```yaml
+messages:
+  - label: status
+    text: "HP: {hp} | Score: {score} | Phase: {game_phase}"
+```
+
+For `scope: node` variables, the value interpolated is the triggering node's value.
+
+### Worked example: HP system
+
+```yaml
+mutable_variables:
+  - label: hp
+    type: integer
+    scope: node
+    initial: 100
+    min: 0
+    max: 100
+
+flags:
+  - label: eliminated
+
+messages:
+  - label: damage_notice
+    text: "You took a hit! HP remaining: {hp}"
+  - label: eliminated_notice
+    text: "You have been eliminated."
+
+zones:
+  - label: danger_zone
+    points:
+      - [37.77, -122.42]
+      - [37.78, -122.42]
+      - [37.77, -122.41]
+
+events:
+  # Deal 25 damage on zone entry (once per minute)
+  - label: take_damage
+    trigger:
+      type: enters_zone
+      target: danger_zone
+    responses:
+      - type: increment_variable
+        variable_label: hp
+        amount: -25
+        to_triggering_node: true
+      - type: send_message
+        message_label: damage_notice
+        to_triggering_node: true
+    exceptions:
+      - kind: node_has_flag
+        flag: eliminated
+    reset_mins: 1
+
+  # Eliminate when HP reaches zero (checked on every position update)
+  - label: elimination
+    trigger:
+      type: variable_threshold
+      variable: hp
+      operator: lte
+      value: 0
+    responses:
+      - type: add_flag
+        flag_label: eliminated
+        to_triggering_node: true
+      - type: send_message
+        message_label: eliminated_notice
+        to_triggering_node: true
+    exceptions:
+      - kind: node_has_flag
+        flag: eliminated
 ```
 
 ---
@@ -645,6 +923,43 @@ are documented in the [Targets](#targets) section below.
 | `flag_label` | yes | A `flags` label |
 | target key | yes | One target key (see Targets) |
 
+#### `add_to_group` — add member(s) to a group
+
+Adds one or more members to a group. For `kind: node` groups the target is any
+node-resolving key. For `kind: zone` groups use `to_zone`. For `kind: waypoint`
+groups use `to_waypoint_radius` (the waypoint label is extracted; the radius is
+ignored for membership purposes).
+
+```yaml
+- type: add_to_group
+  group_label: red_team
+  to_triggering_node: true    # node group — target is node-resolving
+
+- type: add_to_group
+  group_label: active_zones
+  to_zone: north_sector       # zone group — target must be a zone
+```
+
+| Field | Required | Description |
+|---|---|---|
+| `group_label` | yes | A `groups` label |
+| target key | yes | Must match the group's `kind` |
+
+#### `remove_from_group` — remove member(s) from a group
+
+Removes one or more members from a group. Same target rules as `add_to_group`.
+
+```yaml
+- type: remove_from_group
+  group_label: red_team
+  to_triggering_node: true
+```
+
+| Field | Required | Description |
+|---|---|---|
+| `group_label` | yes | A `groups` label |
+| target key | yes | Must match the group's `kind` |
+
 #### `request_location` — ask target node(s) to broadcast their GPS
 
 Sends a best-effort position request to the target node(s). The node may or may
@@ -770,6 +1085,7 @@ The key determines which node(s), zone, or waypoint the response acts on.
 | `to_all_with_flag: <label>` | flag label | All nodes that currently carry that flag | |
 | `to_all_near_waypoint: {waypoint: <label>, meters: <n>}` | object | All nodes within `meters` of the waypoint | |
 | `to_all_near_node: {node: <label>, meters: <n>}` | object | All nodes within `meters` of the named hard-coded node (excluding the target node itself) | Both nodes must have known locations |
+| `to_group: <label>` | group label | For `kind: node` groups: all member nodes (send_message, request_location, add/remove_flag, add/remove_from_group). For `kind: zone` or `kind: waypoint` groups: all member zones/waypoints (add/remove_flag only). | |
 
 ---
 
@@ -792,8 +1108,9 @@ exceptions:
 | Field | Required | Description |
 |---|---|---|
 | `kind` | yes | One of the exception kinds listed below |
-| `flag` | conditional | A `flags` label. Required for all flag-check kinds; not used by `random_skip`. |
-| `target` | conditional | Required for `zone_*` and `waypoint_*` kinds. Omit for `node_*` kinds. |
+| `flag` | conditional | A `flags` label. Required for all flag-check kinds. |
+| `group` | conditional | A `groups` label. Required for all `*_in_group` kinds. |
+| `target` | conditional | Required for `zone_*`, `waypoint_*`, `zone_in_group`, and `waypoint_in_group` kinds. Omit for `node_*` kinds. |
 | `chance` | conditional | Float 0.0–1.0. Required for `random_skip`. |
 
 | Kind | Fields | Meaning |
@@ -804,15 +1121,21 @@ exceptions:
 | `zone_lacks_flag` | `flag`, `target` (zone) | Skip if the named zone does not have this flag |
 | `waypoint_has_flag` | `flag`, `target` (waypoint) | Skip if the named waypoint has this flag |
 | `waypoint_lacks_flag` | `flag`, `target` (waypoint) | Skip if the named waypoint does not have this flag |
+| `node_in_group` | `group` | Skip if the triggering node is a member of this node-kind group |
+| `node_not_in_group` | `group` | Skip if the triggering node is not a member of this node-kind group |
+| `zone_in_group` | `group`, `target` (zone) | Skip if the named zone is a member of this zone-kind group |
+| `zone_not_in_group` | `group`, `target` (zone) | Skip if the named zone is not a member of this zone-kind group |
+| `waypoint_in_group` | `group`, `target` (waypoint) | Skip if the named waypoint is a member of this waypoint-kind group |
+| `waypoint_not_in_group` | `group`, `target` (waypoint) | Skip if the named waypoint is not a member of this waypoint-kind group |
 | `random_skip` | `chance` | Skip with probability `chance` (e.g. `0.3` = 30% chance of skipping) |
 
-**Evaluation order:** All flag-check exceptions are evaluated first. `random_skip` is rolled only
-if every flag-check exception passes. This ensures a deterministic exception (e.g. "player already
-has the winner flag") always takes precedence over randomness.
+**Evaluation order:** All deterministic exceptions (flag checks, group checks) are evaluated first.
+`random_skip` is rolled only if every deterministic exception passes. This ensures a deterministic
+exception (e.g. "player already has the winner flag") always takes precedence over randomness.
 
 **Note:** For `time_window` and `in_zone_on_start` triggers there is no
-triggering node, so `node_has_flag` and `node_lacks_flag` exceptions will never
-match and will not cause a skip.
+triggering node, so `node_has_flag`, `node_lacks_flag`, `node_in_group`, and
+`node_not_in_group` exceptions will never match and will not cause a skip.
 
 ```yaml
 exceptions:
@@ -877,6 +1200,13 @@ conditions are violated:
 - `random_skip` exceptions require `chance` (float 0.0–1.0). `flag` and `target` are not used.
 - `random_options` responses require at least 2 options, each with `weight > 0` and at least one response. All labels inside nested branches are validated the same way as top-level responses.
 - Each `nodes` entry's `initial_flags` must all reference defined flags.
+- `groups` entries require `kind` to be `node`, `zone`, or `waypoint`.
+- Each `groups` entry's `initial_members` must reference labels of the appropriate kind.
+- `add_to_group` / `remove_from_group` responses require a valid `group_label`.
+- `node_in_group` / `node_not_in_group` exceptions require `group` pointing to a `kind: node` group.
+- `zone_in_group` / `zone_not_in_group` exceptions require `group` (a `kind: zone` group) and `target` (a zone label).
+- `waypoint_in_group` / `waypoint_not_in_group` exceptions require `group` (a `kind: waypoint` group) and `target` (a waypoint label).
+- `group_count` variables require `target` to be a defined group label.
 
 Errors are reported with the event label and field that caused the problem, for
 example:

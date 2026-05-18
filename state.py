@@ -57,6 +57,27 @@ CREATE TABLE IF NOT EXISTS node_event_state (
     last_triggered_at TEXT,
     PRIMARY KEY (event_label, node_id)
 );
+
+CREATE TABLE IF NOT EXISTS node_groups (
+    group_label TEXT NOT NULL,
+    member_id   TEXT NOT NULL,
+    added_at    TEXT NOT NULL,
+    PRIMARY KEY (group_label, member_id)
+);
+
+CREATE TABLE IF NOT EXISTS mutable_variables (
+    label      TEXT NOT NULL,
+    node_id    TEXT NOT NULL DEFAULT '',
+    value_int  INTEGER,
+    value_real REAL,
+    value_text TEXT,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (label, node_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_node_flags_label ON node_flags(flag_label);
+CREATE INDEX IF NOT EXISTS idx_node_locations_id ON node_locations(node_id);
+CREATE INDEX IF NOT EXISTS idx_mutable_variables_label ON mutable_variables(label);
 """
 
 _FLAG_TABLE = {
@@ -84,12 +105,20 @@ class GameState:
 
     def init_schema(self) -> None:
         with self._lock:
+            self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.executescript(_SCHEMA)
             try:
                 self._conn.execute("ALTER TABLE event_state ADD COLUMN disabled INTEGER NOT NULL DEFAULT 0")
                 self._conn.commit()
             except Exception:
                 pass
+
+    def apply_initial_groups(self, config: "GameConfig") -> None:
+        node_id_by_label = {n.label: n.node_id for n in config.nodes}
+        for grp in config.groups:
+            for member_label in grp.initial_members:
+                member = node_id_by_label[member_label] if grp.kind == "node" else member_label
+                self.add_to_group(grp.label, member)
 
     def apply_initial_flags(self, config: "GameConfig") -> None:
         for node in config.nodes:
@@ -229,6 +258,99 @@ class GameState:
                     (now,),
                 )
             self._conn.commit()
+
+    # ------------------------------------------------------------------
+    # Mutable variables
+    # ------------------------------------------------------------------
+
+    def get_mutable_variable(self, label: str, node_id: str = '') -> int | float | str | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT value_int, value_real, value_text FROM mutable_variables "
+                "WHERE label=? AND node_id=?",
+                (label, node_id),
+            ).fetchone()
+            if row is None:
+                return None
+            if row["value_int"] is not None:
+                return row["value_int"]
+            if row["value_real"] is not None:
+                return row["value_real"]
+            return row["value_text"]
+
+    def set_mutable_variable(self, label: str, value: int | float | str, node_id: str = '') -> None:
+        vi = value if isinstance(value, int) and not isinstance(value, bool) else None
+        vr = value if isinstance(value, float) else None
+        vt = value if isinstance(value, str) else None
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO mutable_variables(label, node_id, value_int, value_real, value_text, updated_at)
+                VALUES(?, ?, ?, ?, ?, ?)
+                ON CONFLICT(label, node_id) DO UPDATE SET
+                    value_int=excluded.value_int, value_real=excluded.value_real,
+                    value_text=excluded.value_text, updated_at=excluded.updated_at
+                """,
+                (label, node_id, vi, vr, vt, _now_iso()),
+            )
+            self._conn.commit()
+
+    def init_mutable_variables(self, config: "GameConfig") -> None:
+        with self._lock:
+            for mv in config.mutable_variables:
+                value = mv.initial
+                vi = value if isinstance(value, int) and not isinstance(value, bool) else None
+                vr = value if isinstance(value, float) else None
+                vt = value if isinstance(value, str) else None
+                self._conn.execute(
+                    """
+                    INSERT OR IGNORE INTO mutable_variables
+                        (label, node_id, value_int, value_real, value_text, updated_at)
+                    VALUES(?, '', ?, ?, ?, ?)
+                    """,
+                    (mv.label, vi, vr, vt, _now_iso()),
+                )
+            self._conn.commit()
+
+    # ------------------------------------------------------------------
+    # Groups
+    # ------------------------------------------------------------------
+
+    def add_to_group(self, group_label: str, member_id: str) -> None:
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO node_groups(group_label, member_id, added_at)
+                VALUES(?, ?, ?)
+                ON CONFLICT(group_label, member_id) DO UPDATE SET added_at=excluded.added_at
+                """,
+                (group_label, member_id, _now_iso()),
+            )
+            self._conn.commit()
+
+    def remove_from_group(self, group_label: str, member_id: str) -> None:
+        with self._lock:
+            self._conn.execute(
+                "DELETE FROM node_groups WHERE group_label=? AND member_id=?",
+                (group_label, member_id),
+            )
+            self._conn.commit()
+
+    def is_in_group(self, group_label: str, member_id: str) -> bool:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT 1 FROM node_groups WHERE group_label=? AND member_id=?",
+                (group_label, member_id),
+            ).fetchone()
+            return row is not None
+
+    def get_group_members(self, group_label: str) -> list[str]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT member_id FROM node_groups WHERE group_label=?",
+                (group_label,),
+            ).fetchall()
+            return [r["member_id"] for r in rows]
 
     # ------------------------------------------------------------------
     # Event state

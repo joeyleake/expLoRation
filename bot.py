@@ -306,6 +306,8 @@ def main() -> None:
     state = GameState(args.db)
     state.init_schema()
     state.apply_initial_flags(config)
+    state.apply_initial_groups(config)
+    state.init_mutable_variables(config)
     state.init_event_states(config)
 
     # The meshtastic library dispatches via a publishingThread that queues pub.sendMessage
