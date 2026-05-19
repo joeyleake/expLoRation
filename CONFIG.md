@@ -1208,6 +1208,71 @@ within the chosen branch share the same context as the parent event.
 - `times_triggered` is incremented once per event firing regardless of which
   branch was chosen.
 
+#### `with_node` — execute responses in the context of a selected node
+
+Resolves a target to one or more nodes and executes the inner `responses` list as if each selected
+node had triggered the event. Provides a full `NodeContext` to inner responses — including
+`to_triggering_node` (which refers to the selected node) and `create_waypoint` (which stamps a
+waypoint at that node's GPS position).
+
+This is the primary way to use `create_waypoint` from `time_window`, `in_zone_on_start`, or any
+other periodic trigger that has no triggering node.
+
+```yaml
+- type: with_node
+  to_all_with_flag: valid_target    # any node-resolving target; supports random_n
+  random_n: 1                       # optional — select 1 node at random from the resolved list
+  responses:
+    - type: create_waypoint
+      expiry_mins: 60
+      initial_flags:
+        - laser_target
+    - type: send_message
+      message_label: target_locked
+      to_channel: comms
+```
+
+| Field | Required | Description |
+|---|---|---|
+| target key | yes | Any node-resolving target key (all targets except `to_channel`). Supports `random_n`. |
+| `responses` | yes | List of responses to execute per selected node. Same syntax as top-level responses. |
+
+**Notes:**
+- If the selected node has no known location, it is skipped with a log warning and the next node
+  (if any) is tried. This matters for `create_waypoint`, which requires coordinates.
+- `to_triggering_node` inside `with_node` refers to the currently selected node.
+- `with_node` may be nested inside `random_options` branches or inside another `with_node`. Nesting multiplies the node pool: `random_n: 5` outer × `random_n: 5` inner = up to 25 inner executions. Deep nesting with large unsampled pools can be expensive — use `random_n` to bound execution.
+- `destroy_waypoint`, `add_waypoint_flag`, and `remove_waypoint_flag` are not valid inside
+  `with_node` responses (no triggering waypoint context is provided).
+- If the resolved node list is empty (no nodes carry the target flag, or `random_n` sampling
+  results in an empty draw), the response is skipped with a log warning.
+
+**Example — orbital cannon targeting a random registered pilot:**
+
+```yaml
+# Every hour, pick one random pilot node and stamp a waypoint at their location.
+# The waypoint's 30-min expiry triggers the blast event.
+- label: cannon_selector
+  trigger:
+    type: time_window
+    start: "2020-01-01T00:00:00"
+    end:   "2099-01-01T00:00:00"
+  auto_recur: true
+  recur_mins: 60
+  responses:
+    - type: with_node
+      to_all_with_flag: player
+      random_n: 1
+      responses:
+        - type: create_waypoint
+          expiry_mins: 30
+          initial_flags:
+            - laser_target
+        - type: send_message
+          message_label: target_locked
+          to_channel: comms
+```
+
 ---
 
 ### Targets
@@ -1227,6 +1292,7 @@ The key determines which node(s), zone, or waypoint the response acts on.
 | `to_all_with_flag: <label>` | flag label | All nodes that currently carry that flag | Supports `random_n` |
 | `to_all_near_waypoint: {waypoint: <label>, meters: <n>}` | object | All nodes within `meters` of the waypoint | Supports `random_n` |
 | `to_all_near_node: {node: <label>, meters: <n>}` | object | All nodes within `meters` of the named hard-coded node (excluding the target node itself) | Both nodes must have known locations. Supports `random_n` |
+| `to_all_near_triggering_waypoint: {meters: <n>}` | object | All nodes within `meters` of the dynamic waypoint that triggered the current event | Only valid in `near_waypoint + target_flag` and `flag_expired + target_kind: dynamic_waypoint` events. Supports `random_n`. Not valid inside `with_node`. |
 | `to_group: <label>` | group label | For `kind: node` groups: all member nodes (send_message, request_location, add/remove_flag, add/remove_from_group). For `kind: zone` or `kind: waypoint` groups: all member zones/waypoints (add/remove_flag only). | Supports `random_n` for `kind: node` groups |
 
 **`random_n` — random sampling from multi-node targets**
@@ -1365,6 +1431,8 @@ conditions are violated:
 - `waypoint_has_flag` / `waypoint_lacks_flag` with `target` set require `target` to be a defined waypoint label. Without `target`, they check the triggering dynamic waypoint and are only valid in `near_waypoint target_flag` events.
 - `random_skip` exceptions require `chance` (float 0.0–1.0). `flag` and `target` are not used.
 - `random_options` responses require at least 2 options, each with `weight > 0` and at least one response. All labels inside nested branches are validated the same way as top-level responses.
+- `with_node` responses require at least one inner response. `to_channel` is not valid as the `with_node` target. `destroy_waypoint`, `add_waypoint_flag`, `remove_waypoint_flag`, and `to_all_near_triggering_waypoint` are not valid inside `with_node` inner responses.
+- `to_all_near_triggering_waypoint` is only valid in events with a dynamic waypoint context (`near_waypoint + target_flag` and `flag_expired + target_kind: dynamic_waypoint`). It is not valid in `with_node` inner responses.
 - `random_n` must be a positive integer when set. It is not valid on single-node or non-node targets.
 - `create_waypoint` responses are not valid in `time_window`, `in_zone_on_start`, `waypoint_expired`, or `flag_expired` events with `target_kind` other than `node` (no triggering node).
 - `destroy_waypoint` is only valid in `near_waypoint + target_flag` events.

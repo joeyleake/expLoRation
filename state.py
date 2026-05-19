@@ -496,6 +496,13 @@ class GameState:
     # Dynamic waypoints
     # ------------------------------------------------------------------
 
+    def get_dynamic_waypoint_location(self, waypoint_id: int) -> tuple[float, float] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT lat, lon FROM dynamic_waypoints WHERE id=?", (waypoint_id,)
+            ).fetchone()
+            return (row["lat"], row["lon"]) if row else None
+
     def create_dynamic_waypoint(self, lat: float, lon: float, expiry_mins: float | None = None) -> int:
         with self._lock:
             cur = self._conn.execute(

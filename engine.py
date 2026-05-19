@@ -19,12 +19,12 @@ from config import (
     DisableEventResponse, EnableEventResponse,
     AddToGroupResponse, RemoveFromGroupResponse,
     SetVariableResponse, IncrementVariableResponse,
-    RandomOptionsResponse,
+    RandomOptionsResponse, WithNodeResponse,
     CreateWaypointResponse, AddDynamicWaypointFlagResponse,
     RemoveDynamicWaypointFlagResponse, DestroyWaypointResponse,
     TargetTriggeringNode, TargetNode, TargetZone, TargetFlag,
     TargetWaypointRadius, TargetAllInZone, TargetAllWithFlag,
-    TargetAllNearWaypoint, TargetAllNearNode, TargetChannel, TargetGroup,
+    TargetAllNearWaypoint, TargetAllNearTriggeringWaypoint, TargetAllNearNode, TargetChannel, TargetGroup,
     EventException,
 )
 from state import GameState
@@ -528,6 +528,7 @@ class Engine:
 
     def _execute_response(self, resp, ctx: Context) -> None:
         node_id = ctx.node_id if isinstance(ctx, (NodeContext, MessageContext, ExpiryContext)) else None
+        wp_id = getattr(ctx, "triggering_waypoint_id", None)
 
         if isinstance(resp, SendMessageResponse):
             message = self._get_message(resp.message_label)
@@ -537,7 +538,7 @@ class Engine:
             if isinstance(resp.target, TargetChannel):
                 self._send_channel(resp.target.channel_label, text)
             else:
-                nodes = self._resolve_node_targets(resp.target, node_id)
+                nodes = self._resolve_node_targets(resp.target, node_id, wp_id)
                 for nid in nodes:
                     self._send_dm(nid, text)
 
@@ -545,7 +546,7 @@ class Engine:
             adding = isinstance(resp, AddFlagResponse)
             flag_def = self._get_flag_def(resp.flag_label)
             expiry_mins = flag_def.expiry_mins if flag_def else None
-            targets = self._resolve_flag_targets(resp.target, node_id)
+            targets = self._resolve_flag_targets(resp.target, node_id, wp_id)
             for kind, target in targets:
                 if adding:
                     self.state.add_flag(kind, target, resp.flag_label, expiry_mins=expiry_mins)
@@ -555,7 +556,7 @@ class Engine:
                     log.info("Removed flag %r from %s %r", resp.flag_label, kind, target)
 
         elif isinstance(resp, RequestLocationResponse):
-            nodes = self._resolve_node_targets(resp.target, node_id)
+            nodes = self._resolve_node_targets(resp.target, node_id, wp_id)
             for nid in nodes:
                 self._request_location(nid)
 
@@ -576,7 +577,7 @@ class Engine:
             op = "add_to_group" if adding else "remove_from_group"
             kind = self._group_kind.get(resp.group_label, "node")
             if kind == "node":
-                members = self._resolve_node_targets(resp.target, node_id)
+                members = self._resolve_node_targets(resp.target, node_id, wp_id)
             elif kind == "zone":
                 members = [resp.target.zone_label] if isinstance(resp.target, TargetZone) else []
             else:  # waypoint
@@ -593,7 +594,7 @@ class Engine:
             if var_def is None:
                 return
             if var_def.scope == "node":
-                for nid in self._resolve_node_targets(resp.target, node_id):
+                for nid in self._resolve_node_targets(resp.target, node_id, wp_id):
                     self._set_variable(var_def, resp.value, nid)
             else:
                 self._set_variable(var_def, resp.value)
@@ -603,7 +604,7 @@ class Engine:
             if var_def is None:
                 return
             if var_def.scope == "node":
-                for nid in self._resolve_node_targets(resp.target, node_id):
+                for nid in self._resolve_node_targets(resp.target, node_id, wp_id):
                     self._increment_variable(var_def, resp.amount, nid)
             else:
                 self._increment_variable(var_def, resp.amount)
@@ -617,6 +618,28 @@ class Engine:
                     self._execute_response(nested_resp, ctx)
                 except Exception:
                     log.exception("Error executing response in random_options branch")
+
+        elif isinstance(resp, WithNodeResponse):
+            selected_ids = self._resolve_node_targets(resp.target, node_id, wp_id)
+            if not selected_ids:
+                log.warning("with_node: no nodes resolved; skipping")
+                return
+            for selected_id in selected_ids:
+                loc = self.state.get_node_location(selected_id)
+                if loc is None:
+                    log.warning("with_node: skipping node %s — no known location", selected_id)
+                    continue
+                inner_ctx = NodeContext(
+                    node_id=selected_id,
+                    triggering_waypoint_id=getattr(ctx, "triggering_waypoint_id", None),
+                )
+                log.info("with_node: executing %d responses in context of %s",
+                         len(resp.responses), selected_id)
+                for inner_resp in resp.responses:
+                    try:
+                        self._execute_response(inner_resp, inner_ctx)
+                    except Exception:
+                        log.exception("Error in with_node response for node %s", selected_id)
 
         elif isinstance(resp, CreateWaypointResponse):
             loc = self.state.get_node_location(node_id) if node_id else None
@@ -696,7 +719,10 @@ class Engine:
             return random.sample(items, n)
         return items
 
-    def _resolve_node_targets(self, target, triggering_node_id: str | None) -> list[str]:
+    def _resolve_node_targets(
+        self, target, triggering_node_id: str | None,
+        triggering_waypoint_id: int | None = None,
+    ) -> list[str]:
         located = self.state.get_all_located_nodes()
 
         if isinstance(target, TargetTriggeringNode):
@@ -720,6 +746,19 @@ class Engine:
             result = geo.nodes_near_waypoint(waypoint, target.meters, located) if waypoint else []
             return self._apply_random_n(result, target)
 
+        if isinstance(target, TargetAllNearTriggeringWaypoint):
+            if triggering_waypoint_id is None:
+                log.warning("to_all_near_triggering_waypoint: no triggering waypoint in context; skipping")
+                return []
+            loc = self.state.get_dynamic_waypoint_location(triggering_waypoint_id)
+            if loc is None:
+                log.warning("to_all_near_triggering_waypoint: waypoint %d not found; skipping",
+                            triggering_waypoint_id)
+                return []
+            result = [nid for nid, nloc in located.items()
+                      if geo.haversine(*nloc, *loc) <= target.meters]
+            return self._apply_random_n(result, target)
+
         if isinstance(target, TargetAllNearNode):
             node_def = self._get_node_def(target.node_label)
             if node_def is None:
@@ -733,7 +772,10 @@ class Engine:
 
         return []
 
-    def _resolve_flag_targets(self, target, triggering_node_id: str | None) -> list[tuple[str, str]]:
+    def _resolve_flag_targets(
+        self, target, triggering_node_id: str | None,
+        triggering_waypoint_id: int | None = None,
+    ) -> list[tuple[str, str]]:
         """Returns list of (kind, target_label) pairs for state.add/remove_flag."""
         located = self.state.get_all_located_nodes()
 
@@ -764,6 +806,19 @@ class Engine:
         elif isinstance(target, TargetAllNearWaypoint):
             wp = self._get_waypoint(target.waypoint_label)
             result = [("node", nid) for nid in geo.nodes_near_waypoint(wp, target.meters, located)] if wp else []
+            return self._apply_random_n(result, target)
+
+        elif isinstance(target, TargetAllNearTriggeringWaypoint):
+            if triggering_waypoint_id is None:
+                log.warning("to_all_near_triggering_waypoint: no triggering waypoint in context; skipping")
+                return []
+            loc = self.state.get_dynamic_waypoint_location(triggering_waypoint_id)
+            if loc is None:
+                log.warning("to_all_near_triggering_waypoint: waypoint %d not found; skipping",
+                            triggering_waypoint_id)
+                return []
+            result = [("node", nid) for nid, nloc in located.items()
+                      if geo.haversine(*nloc, *loc) <= target.meters]
             return self._apply_random_n(result, target)
 
         elif isinstance(target, TargetAllNearNode):
