@@ -1,0 +1,1623 @@
+# expLoRation — Orbital Cannon Survival
+#
+# OPEN ENROLLMENT — any node in a game zone is automatically a valid target.
+# Nodes that leave all zones lose valid_target and are safe until they re-enter.
+#
+# GAME FLOW:
+#   1. Bot starts — cannon arms automatically
+#   2. Any node entering a game zone gets flagged valid_target
+#   3. Every 15 min the cannon picks one random valid_target node
+#   4. A dynamic waypoint is stamped at that node's location (laser_target, 10-min expiry)
+#   5. Channel warns all nodes near the strike point to flee
+#   6. laser_target expires → blast fires (95%) or misfires (5%)
+#   7. Nodes within 8047m of impact get in_blast_zone (6-sec expiry)
+#   8. in_blast_zone expires → node marked destroyed (permanent)
+#   9. Status report every 60 minutes
+#  10. Game ends when one or zero valid_target nodes remain
+#
+# PLAY AREA: Mountain Mesh coverage area — update zone coordinates before use.
+
+channels:
+  - label: comms
+    name: Testing123
+    psk: AQ==
+    monitor: true
+    participate: true
+
+# ===========================================================================
+# ZONES — Mountain Mesh coverage grid
+# Nodes in ANY of these zones are valid targets.
+# ===========================================================================
+
+zones:
+
+  - label: chattanooga_fringe_a
+    points:
+      - [35.05, -85.30]
+      - [34.75, -85.30]
+      - [34.75, -84.97]
+
+  - label: chattanooga_fringe_b
+    points:
+      - [35.05, -85.30]
+      - [35.05, -84.97]
+      - [34.75, -84.97]
+
+  - label: ocoee_corridor_a
+    points:
+      - [35.05, -84.97]
+      - [34.75, -84.97]
+      - [34.75, -84.63]
+
+  - label: ocoee_corridor_b
+    points:
+      - [35.05, -84.97]
+      - [35.05, -84.63]
+      - [34.75, -84.63]
+
+  - label: hiwassee_murphy_a
+    points:
+      - [35.05, -84.63]
+      - [34.75, -84.63]
+      - [34.75, -84.30]
+
+  - label: hiwassee_murphy_b
+    points:
+      - [35.05, -84.63]
+      - [35.05, -84.30]
+      - [34.75, -84.30]
+
+  - label: cohutta_dalton_a
+    points:
+      - [34.75, -85.30]
+      - [34.42, -85.30]
+      - [34.42, -84.97]
+
+  - label: cohutta_dalton_b
+    points:
+      - [34.75, -85.30]
+      - [34.75, -84.97]
+      - [34.42, -84.97]
+
+  - label: ellijay_cartecay_a
+    points:
+      - [34.75, -84.97]
+      - [34.42, -84.97]
+      - [34.42, -84.63]
+
+  - label: ellijay_cartecay_b
+    points:
+      - [34.75, -84.97]
+      - [34.75, -84.63]
+      - [34.42, -84.63]
+
+  - label: blue_ridge_morganton_a
+    points:
+      - [34.75, -84.63]
+      - [34.42, -84.63]
+      - [34.42, -84.30]
+
+  - label: blue_ridge_morganton_b
+    points:
+      - [34.75, -84.63]
+      - [34.75, -84.30]
+      - [34.42, -84.30]
+
+  - label: toccoa_cornelia_a
+    points:
+      - [34.75, -84.30]
+      - [34.42, -84.30]
+      - [34.42, -83.80]
+
+  - label: toccoa_cornelia_b
+    points:
+      - [34.75, -84.30]
+      - [34.75, -83.80]
+      - [34.42, -83.80]
+
+  - label: calhoun_rome_a
+    points:
+      - [34.42, -85.30]
+      - [34.10, -85.30]
+      - [34.10, -84.97]
+
+  - label: calhoun_rome_b
+    points:
+      - [34.42, -85.30]
+      - [34.42, -84.97]
+      - [34.10, -84.97]
+
+  - label: canton_hickory_flat_a
+    points:
+      - [34.42, -84.97]
+      - [34.10, -84.97]
+      - [34.10, -84.63]
+
+  - label: canton_hickory_flat_b
+    points:
+      - [34.42, -84.97]
+      - [34.42, -84.63]
+      - [34.10, -84.63]
+
+  - label: gainesville_hall_a
+    points:
+      - [34.42, -84.63]
+      - [34.10, -84.63]
+      - [34.10, -84.30]
+
+  - label: gainesville_hall_b
+    points:
+      - [34.42, -84.63]
+      - [34.42, -84.30]
+      - [34.10, -84.30]
+
+  - label: anderson_sc_fringe_a
+    points:
+      - [34.42, -84.30]
+      - [34.10, -84.30]
+      - [34.10, -83.50]
+
+  - label: anderson_sc_fringe_b
+    points:
+      - [34.42, -84.30]
+      - [34.42, -83.50]
+      - [34.10, -83.50]
+
+  - label: roswell_alpharetta_a
+    points:
+      - [34.10, -84.97]
+      - [33.75, -84.97]
+      - [33.75, -84.63]
+
+  - label: roswell_alpharetta_b
+    points:
+      - [34.10, -84.97]
+      - [34.10, -84.63]
+      - [33.75, -84.63]
+
+  - label: atlanta_core_a
+    points:
+      - [34.10, -84.63]
+      - [33.75, -84.63]
+      - [33.75, -84.20]
+
+  - label: atlanta_core_b
+    points:
+      - [34.10, -84.63]
+      - [34.10, -84.20]
+      - [33.75, -84.20]
+
+  - label: conyers_covington_a
+    points:
+      - [34.10, -84.20]
+      - [33.75, -84.20]
+      - [33.75, -83.50]
+
+  - label: conyers_covington_b
+    points:
+      - [34.10, -84.20]
+      - [34.10, -83.50]
+      - [33.75, -83.50]
+
+  - label: south_atlanta_a
+    points:
+      - [33.75, -84.97]
+      - [33.40, -84.97]
+      - [33.40, -84.20]
+
+  - label: south_atlanta_b
+    points:
+      - [33.75, -84.97]
+      - [33.75, -84.20]
+      - [33.40, -84.20]
+
+# ===========================================================================
+# FLAGS
+# ===========================================================================
+
+flags:
+  - label: valid_target                # node is currently in a game zone
+  - label: destroyed                   # node has been permanently vaporized
+  - label: game_over                   # anchored on chattanooga_fringe_a
+  - label: laser_target
+    expiry_mins: 10
+  - label: in_blast_zone
+    expiry_mins: .1
+
+# ===========================================================================
+# VARIABLES
+# ===========================================================================
+
+mutable_variables:
+  - label: destroyed_count
+    type: integer
+    scope: global
+    initial: 0
+    min: 0
+
+variables:
+  - label: valid_target_count
+    scope: global
+    tracks: flag_count
+    target: valid_target
+
+# ===========================================================================
+# MESSAGES
+# ===========================================================================
+
+messages:
+
+  - label: new_target_announce
+    text: "🎯 NEW TARGET: {node_id} has entered the grid in zone {zone}."
+
+  - label: target_locked
+    text: "⦻ LOCK ON: {node_id}. Target in {zone} painted. If you're within 5 miles — MOVE! You have 10 minutes."
+
+  - label: blast_msg_1
+    text: "💥 ORBITAL STRIKE EXECUTED. The cannon has delivered its payload with extreme prejudice."
+
+  - label: blast_msg_2
+    text: "☄️ DIRECT HIT CONFIRMED. From way downtown, BANG!"
+
+  - label: blast_msg_3
+    text: "🚀 ORDNANCE DELIVERED. The crater will make a lovely memorial."
+
+  - label: blast_msg_4
+    text: "⚡ KINETIC STRIKE COMPLETE. The target area has been enthusiastically rearranged at the molecular level."
+
+  - label: blast_msg_5
+    text: "🔥 BEAM FIRED. High-fives all around at Orbital Weapons HQ."
+
+  - label: misfire_msg
+    text: "🔧 CANNON MALFUNCTION DETECTED. The orbital strike team apologizes. This will not happen again."
+
+  - label: obliterated_1
+    text: "💀 {node_id} — VAPORIZED"
+
+  - label: obliterated_2
+    text: "☠️ {node_id} — SCRAPPED"
+
+  - label: obliterated_3
+    text: "🔥 {node_id} — CARBONIZED"
+
+  - label: obliterated_4
+    text: "⚡ {node_id} — FRIED"
+
+  - label: obliterated_5
+    text: "🪦 {node_id} — ANNIHILATED"
+
+  - label: status_msg
+    text: |
+      📡 CANNON STATUS
+      🟢 Active: {valid_target_count}  🔴 Destroyed: {destroyed_count}
+      🛰️ Cannon is reloading...
+
+  - label: last_survivor_msg
+    text: |
+      🏆 ONE NODE STANDING!
+      The cannon has run out of valid targets. Boo.
+      ☠️ Destroyed: {destroyed_count}
+      Well played.
+
+  - label: everyone_dead_msg
+    text: |
+      💥 TOTAL COVERAGE ACHIEVED.
+      Every node eliminated. The mesh is silent.
+      ☠️ Destroyed: {destroyed_count}
+      The cannon won.
+
+# ===========================================================================
+# EVENTS
+# ===========================================================================
+
+events:
+
+  # ---------------------------------------------------------------------------
+  # ZONE ENTRY — any node entering any game zone gets valid_target
+  # One event per populated zone. Empty zones omitted for brevity.
+  # The node_has_flag: valid_target exception prevents duplicate flagging
+  # when a node crosses a zone boundary from one game zone to another.
+  # ---------------------------------------------------------------------------
+
+  - label: enter_chattanooga_fringe_a
+    trigger:
+      type: enters_zone
+      target: chattanooga_fringe_a
+    trigger_per_node: true
+    exceptions:
+      - kind: node_has_flag
+        flag: valid_target
+      - kind: node_has_flag
+        flag: destroyed
+      - kind: zone_has_flag
+        flag: game_over
+        target: chattanooga_fringe_a
+    responses:
+      - type: add_flag
+        flag_label: valid_target
+        to_triggering_node: true
+      - type: send_message
+        message_label: new_target_announce
+        to_channel: comms
+
+  - label: enter_chattanooga_fringe_b
+    trigger:
+      type: enters_zone
+      target: chattanooga_fringe_b
+    trigger_per_node: true
+    exceptions:
+      - kind: node_has_flag
+        flag: valid_target
+      - kind: node_has_flag
+        flag: destroyed
+      - kind: zone_has_flag
+        flag: game_over
+        target: chattanooga_fringe_a
+    responses:
+      - type: add_flag
+        flag_label: valid_target
+        to_triggering_node: true
+      - type: send_message
+        message_label: new_target_announce
+        to_channel: comms
+
+  - label: enter_ocoee_corridor_a
+    trigger:
+      type: enters_zone
+      target: ocoee_corridor_a
+    trigger_per_node: true
+    exceptions:
+      - kind: node_has_flag
+        flag: valid_target
+      - kind: node_has_flag
+        flag: destroyed
+      - kind: zone_has_flag
+        flag: game_over
+        target: chattanooga_fringe_a
+    responses:
+      - type: add_flag
+        flag_label: valid_target
+        to_triggering_node: true
+      - type: send_message
+        message_label: new_target_announce
+        to_channel: comms
+
+  - label: enter_toccoa_cornelia_a
+    trigger:
+      type: enters_zone
+      target: toccoa_cornelia_a
+    trigger_per_node: true
+    exceptions:
+      - kind: node_has_flag
+        flag: valid_target
+      - kind: node_has_flag
+        flag: destroyed
+      - kind: zone_has_flag
+        flag: game_over
+        target: chattanooga_fringe_a
+    responses:
+      - type: add_flag
+        flag_label: valid_target
+        to_triggering_node: true
+      - type: send_message
+        message_label: new_target_announce
+        to_channel: comms
+
+  - label: enter_calhoun_rome_a
+    trigger:
+      type: enters_zone
+      target: calhoun_rome_a
+    trigger_per_node: true
+    exceptions:
+      - kind: node_has_flag
+        flag: valid_target
+      - kind: node_has_flag
+        flag: destroyed
+      - kind: zone_has_flag
+        flag: game_over
+        target: chattanooga_fringe_a
+    responses:
+      - type: add_flag
+        flag_label: valid_target
+        to_triggering_node: true
+      - type: send_message
+        message_label: new_target_announce
+        to_channel: comms
+
+  - label: enter_gainesville_hall_a
+    trigger:
+      type: enters_zone
+      target: gainesville_hall_a
+    trigger_per_node: true
+    exceptions:
+      - kind: node_has_flag
+        flag: valid_target
+      - kind: node_has_flag
+        flag: destroyed
+      - kind: zone_has_flag
+        flag: game_over
+        target: chattanooga_fringe_a
+    responses:
+      - type: add_flag
+        flag_label: valid_target
+        to_triggering_node: true
+      - type: send_message
+        message_label: new_target_announce
+        to_channel: comms
+
+  - label: enter_anderson_sc_fringe_a
+    trigger:
+      type: enters_zone
+      target: anderson_sc_fringe_a
+    trigger_per_node: true
+    exceptions:
+      - kind: node_has_flag
+        flag: valid_target
+      - kind: node_has_flag
+        flag: destroyed
+      - kind: zone_has_flag
+        flag: game_over
+        target: chattanooga_fringe_a
+    responses:
+      - type: add_flag
+        flag_label: valid_target
+        to_triggering_node: true
+      - type: send_message
+        message_label: new_target_announce
+        to_channel: comms
+
+  - label: enter_anderson_sc_fringe_b
+    trigger:
+      type: enters_zone
+      target: anderson_sc_fringe_b
+    trigger_per_node: true
+    exceptions:
+      - kind: node_has_flag
+        flag: valid_target
+      - kind: node_has_flag
+        flag: destroyed
+      - kind: zone_has_flag
+        flag: game_over
+        target: chattanooga_fringe_a
+    responses:
+      - type: add_flag
+        flag_label: valid_target
+        to_triggering_node: true
+      - type: send_message
+        message_label: new_target_announce
+        to_channel: comms
+
+  - label: enter_atlanta_core_a
+    trigger:
+      type: enters_zone
+      target: atlanta_core_a
+    trigger_per_node: true
+    exceptions:
+      - kind: node_has_flag
+        flag: valid_target
+      - kind: node_has_flag
+        flag: destroyed
+      - kind: zone_has_flag
+        flag: game_over
+        target: chattanooga_fringe_a
+    responses:
+      - type: add_flag
+        flag_label: valid_target
+        to_triggering_node: true
+      - type: send_message
+        message_label: new_target_announce
+        to_channel: comms
+
+  - label: enter_atlanta_core_b
+    trigger:
+      type: enters_zone
+      target: atlanta_core_b
+    trigger_per_node: true
+    exceptions:
+      - kind: node_has_flag
+        flag: valid_target
+      - kind: node_has_flag
+        flag: destroyed
+      - kind: zone_has_flag
+        flag: game_over
+        target: chattanooga_fringe_a
+    responses:
+      - type: add_flag
+        flag_label: valid_target
+        to_triggering_node: true
+      - type: send_message
+        message_label: new_target_announce
+        to_channel: comms
+
+  - label: enter_conyers_covington_a
+    trigger:
+      type: enters_zone
+      target: conyers_covington_a
+    trigger_per_node: true
+    exceptions:
+      - kind: node_has_flag
+        flag: valid_target
+      - kind: node_has_flag
+        flag: destroyed
+      - kind: zone_has_flag
+        flag: game_over
+        target: chattanooga_fringe_a
+    responses:
+      - type: add_flag
+        flag_label: valid_target
+        to_triggering_node: true
+      - type: send_message
+        message_label: new_target_announce
+        to_channel: comms
+
+  - label: enter_south_atlanta_b
+    trigger:
+      type: enters_zone
+      target: south_atlanta_b
+    trigger_per_node: true
+    exceptions:
+      - kind: node_has_flag
+        flag: valid_target
+      - kind: node_has_flag
+        flag: destroyed
+      - kind: zone_has_flag
+        flag: game_over
+        target: chattanooga_fringe_a
+    responses:
+      - type: add_flag
+        flag_label: valid_target
+        to_triggering_node: true
+      - type: send_message
+        message_label: new_target_announce
+        to_channel: comms
+
+  - label: enter_ocoee_corridor_b
+    trigger:
+      type: enters_zone
+      target: ocoee_corridor_b
+    trigger_per_node: true
+    exceptions:
+      - kind: node_has_flag
+        flag: valid_target
+      - kind: node_has_flag
+        flag: destroyed
+      - kind: zone_has_flag
+        flag: game_over
+        target: chattanooga_fringe_a
+    responses:
+      - type: add_flag
+        flag_label: valid_target
+        to_triggering_node: true
+      - type: send_message
+        message_label: new_target_announce
+        to_channel: comms
+
+  - label: enter_hiwassee_murphy_a
+    trigger:
+      type: enters_zone
+      target: hiwassee_murphy_a
+    trigger_per_node: true
+    exceptions:
+      - kind: node_has_flag
+        flag: valid_target
+      - kind: node_has_flag
+        flag: destroyed
+      - kind: zone_has_flag
+        flag: game_over
+        target: chattanooga_fringe_a
+    responses:
+      - type: add_flag
+        flag_label: valid_target
+        to_triggering_node: true
+      - type: send_message
+        message_label: new_target_announce
+        to_channel: comms
+
+  - label: enter_hiwassee_murphy_b
+    trigger:
+      type: enters_zone
+      target: hiwassee_murphy_b
+    trigger_per_node: true
+    exceptions:
+      - kind: node_has_flag
+        flag: valid_target
+      - kind: node_has_flag
+        flag: destroyed
+      - kind: zone_has_flag
+        flag: game_over
+        target: chattanooga_fringe_a
+    responses:
+      - type: add_flag
+        flag_label: valid_target
+        to_triggering_node: true
+      - type: send_message
+        message_label: new_target_announce
+        to_channel: comms
+
+  - label: enter_cohutta_dalton_a
+    trigger:
+      type: enters_zone
+      target: cohutta_dalton_a
+    trigger_per_node: true
+    exceptions:
+      - kind: node_has_flag
+        flag: valid_target
+      - kind: node_has_flag
+        flag: destroyed
+      - kind: zone_has_flag
+        flag: game_over
+        target: chattanooga_fringe_a
+    responses:
+      - type: add_flag
+        flag_label: valid_target
+        to_triggering_node: true
+      - type: send_message
+        message_label: new_target_announce
+        to_channel: comms
+
+  - label: enter_cohutta_dalton_b
+    trigger:
+      type: enters_zone
+      target: cohutta_dalton_b
+    trigger_per_node: true
+    exceptions:
+      - kind: node_has_flag
+        flag: valid_target
+      - kind: node_has_flag
+        flag: destroyed
+      - kind: zone_has_flag
+        flag: game_over
+        target: chattanooga_fringe_a
+    responses:
+      - type: add_flag
+        flag_label: valid_target
+        to_triggering_node: true
+      - type: send_message
+        message_label: new_target_announce
+        to_channel: comms
+
+  - label: enter_ellijay_cartecay_a
+    trigger:
+      type: enters_zone
+      target: ellijay_cartecay_a
+    trigger_per_node: true
+    exceptions:
+      - kind: node_has_flag
+        flag: valid_target
+      - kind: node_has_flag
+        flag: destroyed
+      - kind: zone_has_flag
+        flag: game_over
+        target: chattanooga_fringe_a
+    responses:
+      - type: add_flag
+        flag_label: valid_target
+        to_triggering_node: true
+      - type: send_message
+        message_label: new_target_announce
+        to_channel: comms
+
+  - label: enter_ellijay_cartecay_b
+    trigger:
+      type: enters_zone
+      target: ellijay_cartecay_b
+    trigger_per_node: true
+    exceptions:
+      - kind: node_has_flag
+        flag: valid_target
+      - kind: node_has_flag
+        flag: destroyed
+      - kind: zone_has_flag
+        flag: game_over
+        target: chattanooga_fringe_a
+    responses:
+      - type: add_flag
+        flag_label: valid_target
+        to_triggering_node: true
+      - type: send_message
+        message_label: new_target_announce
+        to_channel: comms
+
+  - label: enter_blue_ridge_morganton_a
+    trigger:
+      type: enters_zone
+      target: blue_ridge_morganton_a
+    trigger_per_node: true
+    exceptions:
+      - kind: node_has_flag
+        flag: valid_target
+      - kind: node_has_flag
+        flag: destroyed
+      - kind: zone_has_flag
+        flag: game_over
+        target: chattanooga_fringe_a
+    responses:
+      - type: add_flag
+        flag_label: valid_target
+        to_triggering_node: true
+      - type: send_message
+        message_label: new_target_announce
+        to_channel: comms
+
+  - label: enter_blue_ridge_morganton_b
+    trigger:
+      type: enters_zone
+      target: blue_ridge_morganton_b
+    trigger_per_node: true
+    exceptions:
+      - kind: node_has_flag
+        flag: valid_target
+      - kind: node_has_flag
+        flag: destroyed
+      - kind: zone_has_flag
+        flag: game_over
+        target: chattanooga_fringe_a
+    responses:
+      - type: add_flag
+        flag_label: valid_target
+        to_triggering_node: true
+      - type: send_message
+        message_label: new_target_announce
+        to_channel: comms
+
+  - label: enter_toccoa_cornelia_b
+    trigger:
+      type: enters_zone
+      target: toccoa_cornelia_b
+    trigger_per_node: true
+    exceptions:
+      - kind: node_has_flag
+        flag: valid_target
+      - kind: node_has_flag
+        flag: destroyed
+      - kind: zone_has_flag
+        flag: game_over
+        target: chattanooga_fringe_a
+    responses:
+      - type: add_flag
+        flag_label: valid_target
+        to_triggering_node: true
+      - type: send_message
+        message_label: new_target_announce
+        to_channel: comms
+
+  - label: enter_calhoun_rome_b
+    trigger:
+      type: enters_zone
+      target: calhoun_rome_b
+    trigger_per_node: true
+    exceptions:
+      - kind: node_has_flag
+        flag: valid_target
+      - kind: node_has_flag
+        flag: destroyed
+      - kind: zone_has_flag
+        flag: game_over
+        target: chattanooga_fringe_a
+    responses:
+      - type: add_flag
+        flag_label: valid_target
+        to_triggering_node: true
+      - type: send_message
+        message_label: new_target_announce
+        to_channel: comms
+
+  - label: enter_canton_hickory_flat_a
+    trigger:
+      type: enters_zone
+      target: canton_hickory_flat_a
+    trigger_per_node: true
+    exceptions:
+      - kind: node_has_flag
+        flag: valid_target
+      - kind: node_has_flag
+        flag: destroyed
+      - kind: zone_has_flag
+        flag: game_over
+        target: chattanooga_fringe_a
+    responses:
+      - type: add_flag
+        flag_label: valid_target
+        to_triggering_node: true
+      - type: send_message
+        message_label: new_target_announce
+        to_channel: comms
+
+  - label: enter_canton_hickory_flat_b
+    trigger:
+      type: enters_zone
+      target: canton_hickory_flat_b
+    trigger_per_node: true
+    exceptions:
+      - kind: node_has_flag
+        flag: valid_target
+      - kind: node_has_flag
+        flag: destroyed
+      - kind: zone_has_flag
+        flag: game_over
+        target: chattanooga_fringe_a
+    responses:
+      - type: add_flag
+        flag_label: valid_target
+        to_triggering_node: true
+      - type: send_message
+        message_label: new_target_announce
+        to_channel: comms
+
+  - label: enter_gainesville_hall_b
+    trigger:
+      type: enters_zone
+      target: gainesville_hall_b
+    trigger_per_node: true
+    exceptions:
+      - kind: node_has_flag
+        flag: valid_target
+      - kind: node_has_flag
+        flag: destroyed
+      - kind: zone_has_flag
+        flag: game_over
+        target: chattanooga_fringe_a
+    responses:
+      - type: add_flag
+        flag_label: valid_target
+        to_triggering_node: true
+      - type: send_message
+        message_label: new_target_announce
+        to_channel: comms
+
+  - label: enter_roswell_alpharetta_a
+    trigger:
+      type: enters_zone
+      target: roswell_alpharetta_a
+    trigger_per_node: true
+    exceptions:
+      - kind: node_has_flag
+        flag: valid_target
+      - kind: node_has_flag
+        flag: destroyed
+      - kind: zone_has_flag
+        flag: game_over
+        target: chattanooga_fringe_a
+    responses:
+      - type: add_flag
+        flag_label: valid_target
+        to_triggering_node: true
+      - type: send_message
+        message_label: new_target_announce
+        to_channel: comms
+
+  - label: enter_roswell_alpharetta_b
+    trigger:
+      type: enters_zone
+      target: roswell_alpharetta_b
+    trigger_per_node: true
+    exceptions:
+      - kind: node_has_flag
+        flag: valid_target
+      - kind: node_has_flag
+        flag: destroyed
+      - kind: zone_has_flag
+        flag: game_over
+        target: chattanooga_fringe_a
+    responses:
+      - type: add_flag
+        flag_label: valid_target
+        to_triggering_node: true
+      - type: send_message
+        message_label: new_target_announce
+        to_channel: comms
+
+  - label: enter_conyers_covington_b
+    trigger:
+      type: enters_zone
+      target: conyers_covington_b
+    trigger_per_node: true
+    exceptions:
+      - kind: node_has_flag
+        flag: valid_target
+      - kind: node_has_flag
+        flag: destroyed
+      - kind: zone_has_flag
+        flag: game_over
+        target: chattanooga_fringe_a
+    responses:
+      - type: add_flag
+        flag_label: valid_target
+        to_triggering_node: true
+      - type: send_message
+        message_label: new_target_announce
+        to_channel: comms
+
+  - label: enter_south_atlanta_a
+    trigger:
+      type: enters_zone
+      target: south_atlanta_a
+    trigger_per_node: true
+    exceptions:
+      - kind: node_has_flag
+        flag: valid_target
+      - kind: node_has_flag
+        flag: destroyed
+      - kind: zone_has_flag
+        flag: game_over
+        target: chattanooga_fringe_a
+    responses:
+      - type: add_flag
+        flag_label: valid_target
+        to_triggering_node: true
+      - type: send_message
+        message_label: new_target_announce
+        to_channel: comms
+
+  # ---------------------------------------------------------------------------
+  # ZONE EXIT — node leaving a zone loses valid_target
+  # Since zones are adjacent, a node moving between zones will trigger
+  # leaves_zone on the old zone and enters_zone on the new zone. The
+  # node_has_flag: valid_target exception on entry events prevents
+  # double-announcing. The leaves_zone event removes valid_target, and
+  # the enters_zone on the new zone immediately re-adds it — net effect
+  # is no disruption for zone-to-zone movement within the play area.
+  # A node leaving the play area entirely will lose valid_target and not
+  # re-acquire it until it enters a zone again.
+  # ---------------------------------------------------------------------------
+
+  - label: leave_chattanooga_fringe_a
+    trigger:
+      type: leaves_zone
+      target: chattanooga_fringe_a
+    trigger_per_node: true
+    exceptions:
+      - kind: node_lacks_flag
+        flag: valid_target
+      - kind: node_has_flag
+        flag: destroyed
+    responses:
+      - type: remove_flag
+        flag_label: valid_target
+        to_triggering_node: true
+
+  - label: leave_atlanta_core_a
+    trigger:
+      type: leaves_zone
+      target: atlanta_core_a
+    trigger_per_node: true
+    exceptions:
+      - kind: node_lacks_flag
+        flag: valid_target
+      - kind: node_has_flag
+        flag: destroyed
+    responses:
+      - type: remove_flag
+        flag_label: valid_target
+        to_triggering_node: true
+
+  - label: leave_south_atlanta_b
+    trigger:
+      type: leaves_zone
+      target: south_atlanta_b
+    trigger_per_node: true
+    exceptions:
+      - kind: node_lacks_flag
+        flag: valid_target
+      - kind: node_has_flag
+        flag: destroyed
+    responses:
+      - type: remove_flag
+        flag_label: valid_target
+        to_triggering_node: true
+
+  - label: leave_chattanooga_fringe_b
+    trigger:
+      type: leaves_zone
+      target: chattanooga_fringe_b
+    trigger_per_node: true
+    exceptions:
+      - kind: node_lacks_flag
+        flag: valid_target
+      - kind: node_has_flag
+        flag: destroyed
+    responses:
+      - type: remove_flag
+        flag_label: valid_target
+        to_triggering_node: true
+
+  - label: leave_ocoee_corridor_a
+    trigger:
+      type: leaves_zone
+      target: ocoee_corridor_a
+    trigger_per_node: true
+    exceptions:
+      - kind: node_lacks_flag
+        flag: valid_target
+      - kind: node_has_flag
+        flag: destroyed
+    responses:
+      - type: remove_flag
+        flag_label: valid_target
+        to_triggering_node: true
+
+  - label: leave_ocoee_corridor_b
+    trigger:
+      type: leaves_zone
+      target: ocoee_corridor_b
+    trigger_per_node: true
+    exceptions:
+      - kind: node_lacks_flag
+        flag: valid_target
+      - kind: node_has_flag
+        flag: destroyed
+    responses:
+      - type: remove_flag
+        flag_label: valid_target
+        to_triggering_node: true
+
+  - label: leave_hiwassee_murphy_a
+    trigger:
+      type: leaves_zone
+      target: hiwassee_murphy_a
+    trigger_per_node: true
+    exceptions:
+      - kind: node_lacks_flag
+        flag: valid_target
+      - kind: node_has_flag
+        flag: destroyed
+    responses:
+      - type: remove_flag
+        flag_label: valid_target
+        to_triggering_node: true
+
+  - label: leave_hiwassee_murphy_b
+    trigger:
+      type: leaves_zone
+      target: hiwassee_murphy_b
+    trigger_per_node: true
+    exceptions:
+      - kind: node_lacks_flag
+        flag: valid_target
+      - kind: node_has_flag
+        flag: destroyed
+    responses:
+      - type: remove_flag
+        flag_label: valid_target
+        to_triggering_node: true
+
+  - label: leave_cohutta_dalton_a
+    trigger:
+      type: leaves_zone
+      target: cohutta_dalton_a
+    trigger_per_node: true
+    exceptions:
+      - kind: node_lacks_flag
+        flag: valid_target
+      - kind: node_has_flag
+        flag: destroyed
+    responses:
+      - type: remove_flag
+        flag_label: valid_target
+        to_triggering_node: true
+
+  - label: leave_cohutta_dalton_b
+    trigger:
+      type: leaves_zone
+      target: cohutta_dalton_b
+    trigger_per_node: true
+    exceptions:
+      - kind: node_lacks_flag
+        flag: valid_target
+      - kind: node_has_flag
+        flag: destroyed
+    responses:
+      - type: remove_flag
+        flag_label: valid_target
+        to_triggering_node: true
+
+  - label: leave_ellijay_cartecay_a
+    trigger:
+      type: leaves_zone
+      target: ellijay_cartecay_a
+    trigger_per_node: true
+    exceptions:
+      - kind: node_lacks_flag
+        flag: valid_target
+      - kind: node_has_flag
+        flag: destroyed
+    responses:
+      - type: remove_flag
+        flag_label: valid_target
+        to_triggering_node: true
+
+  - label: leave_ellijay_cartecay_b
+    trigger:
+      type: leaves_zone
+      target: ellijay_cartecay_b
+    trigger_per_node: true
+    exceptions:
+      - kind: node_lacks_flag
+        flag: valid_target
+      - kind: node_has_flag
+        flag: destroyed
+    responses:
+      - type: remove_flag
+        flag_label: valid_target
+        to_triggering_node: true
+
+  - label: leave_blue_ridge_morganton_a
+    trigger:
+      type: leaves_zone
+      target: blue_ridge_morganton_a
+    trigger_per_node: true
+    exceptions:
+      - kind: node_lacks_flag
+        flag: valid_target
+      - kind: node_has_flag
+        flag: destroyed
+    responses:
+      - type: remove_flag
+        flag_label: valid_target
+        to_triggering_node: true
+
+  - label: leave_blue_ridge_morganton_b
+    trigger:
+      type: leaves_zone
+      target: blue_ridge_morganton_b
+    trigger_per_node: true
+    exceptions:
+      - kind: node_lacks_flag
+        flag: valid_target
+      - kind: node_has_flag
+        flag: destroyed
+    responses:
+      - type: remove_flag
+        flag_label: valid_target
+        to_triggering_node: true
+
+  - label: leave_toccoa_cornelia_a
+    trigger:
+      type: leaves_zone
+      target: toccoa_cornelia_a
+    trigger_per_node: true
+    exceptions:
+      - kind: node_lacks_flag
+        flag: valid_target
+      - kind: node_has_flag
+        flag: destroyed
+    responses:
+      - type: remove_flag
+        flag_label: valid_target
+        to_triggering_node: true
+
+  - label: leave_toccoa_cornelia_b
+    trigger:
+      type: leaves_zone
+      target: toccoa_cornelia_b
+    trigger_per_node: true
+    exceptions:
+      - kind: node_lacks_flag
+        flag: valid_target
+      - kind: node_has_flag
+        flag: destroyed
+    responses:
+      - type: remove_flag
+        flag_label: valid_target
+        to_triggering_node: true
+
+  - label: leave_calhoun_rome_a
+    trigger:
+      type: leaves_zone
+      target: calhoun_rome_a
+    trigger_per_node: true
+    exceptions:
+      - kind: node_lacks_flag
+        flag: valid_target
+      - kind: node_has_flag
+        flag: destroyed
+    responses:
+      - type: remove_flag
+        flag_label: valid_target
+        to_triggering_node: true
+
+  - label: leave_calhoun_rome_b
+    trigger:
+      type: leaves_zone
+      target: calhoun_rome_b
+    trigger_per_node: true
+    exceptions:
+      - kind: node_lacks_flag
+        flag: valid_target
+      - kind: node_has_flag
+        flag: destroyed
+    responses:
+      - type: remove_flag
+        flag_label: valid_target
+        to_triggering_node: true
+
+  - label: leave_canton_hickory_flat_a
+    trigger:
+      type: leaves_zone
+      target: canton_hickory_flat_a
+    trigger_per_node: true
+    exceptions:
+      - kind: node_lacks_flag
+        flag: valid_target
+      - kind: node_has_flag
+        flag: destroyed
+    responses:
+      - type: remove_flag
+        flag_label: valid_target
+        to_triggering_node: true
+
+  - label: leave_canton_hickory_flat_b
+    trigger:
+      type: leaves_zone
+      target: canton_hickory_flat_b
+    trigger_per_node: true
+    exceptions:
+      - kind: node_lacks_flag
+        flag: valid_target
+      - kind: node_has_flag
+        flag: destroyed
+    responses:
+      - type: remove_flag
+        flag_label: valid_target
+        to_triggering_node: true
+
+  - label: leave_gainesville_hall_a
+    trigger:
+      type: leaves_zone
+      target: gainesville_hall_a
+    trigger_per_node: true
+    exceptions:
+      - kind: node_lacks_flag
+        flag: valid_target
+      - kind: node_has_flag
+        flag: destroyed
+    responses:
+      - type: remove_flag
+        flag_label: valid_target
+        to_triggering_node: true
+
+  - label: leave_gainesville_hall_b
+    trigger:
+      type: leaves_zone
+      target: gainesville_hall_b
+    trigger_per_node: true
+    exceptions:
+      - kind: node_lacks_flag
+        flag: valid_target
+      - kind: node_has_flag
+        flag: destroyed
+    responses:
+      - type: remove_flag
+        flag_label: valid_target
+        to_triggering_node: true
+
+  - label: leave_anderson_sc_fringe_a
+    trigger:
+      type: leaves_zone
+      target: anderson_sc_fringe_a
+    trigger_per_node: true
+    exceptions:
+      - kind: node_lacks_flag
+        flag: valid_target
+      - kind: node_has_flag
+        flag: destroyed
+    responses:
+      - type: remove_flag
+        flag_label: valid_target
+        to_triggering_node: true
+
+  - label: leave_anderson_sc_fringe_b
+    trigger:
+      type: leaves_zone
+      target: anderson_sc_fringe_b
+    trigger_per_node: true
+    exceptions:
+      - kind: node_lacks_flag
+        flag: valid_target
+      - kind: node_has_flag
+        flag: destroyed
+    responses:
+      - type: remove_flag
+        flag_label: valid_target
+        to_triggering_node: true
+
+  - label: leave_roswell_alpharetta_a
+    trigger:
+      type: leaves_zone
+      target: roswell_alpharetta_a
+    trigger_per_node: true
+    exceptions:
+      - kind: node_lacks_flag
+        flag: valid_target
+      - kind: node_has_flag
+        flag: destroyed
+    responses:
+      - type: remove_flag
+        flag_label: valid_target
+        to_triggering_node: true
+
+  - label: leave_roswell_alpharetta_b
+    trigger:
+      type: leaves_zone
+      target: roswell_alpharetta_b
+    trigger_per_node: true
+    exceptions:
+      - kind: node_lacks_flag
+        flag: valid_target
+      - kind: node_has_flag
+        flag: destroyed
+    responses:
+      - type: remove_flag
+        flag_label: valid_target
+        to_triggering_node: true
+
+  - label: leave_atlanta_core_b
+    trigger:
+      type: leaves_zone
+      target: atlanta_core_b
+    trigger_per_node: true
+    exceptions:
+      - kind: node_lacks_flag
+        flag: valid_target
+      - kind: node_has_flag
+        flag: destroyed
+    responses:
+      - type: remove_flag
+        flag_label: valid_target
+        to_triggering_node: true
+
+  - label: leave_conyers_covington_a
+    trigger:
+      type: leaves_zone
+      target: conyers_covington_a
+    trigger_per_node: true
+    exceptions:
+      - kind: node_lacks_flag
+        flag: valid_target
+      - kind: node_has_flag
+        flag: destroyed
+    responses:
+      - type: remove_flag
+        flag_label: valid_target
+        to_triggering_node: true
+
+  - label: leave_conyers_covington_b
+    trigger:
+      type: leaves_zone
+      target: conyers_covington_b
+    trigger_per_node: true
+    exceptions:
+      - kind: node_lacks_flag
+        flag: valid_target
+      - kind: node_has_flag
+        flag: destroyed
+    responses:
+      - type: remove_flag
+        flag_label: valid_target
+        to_triggering_node: true
+
+  - label: leave_south_atlanta_a
+    trigger:
+      type: leaves_zone
+      target: south_atlanta_a
+    trigger_per_node: true
+    exceptions:
+      - kind: node_lacks_flag
+        flag: valid_target
+      - kind: node_has_flag
+        flag: destroyed
+    responses:
+      - type: remove_flag
+        flag_label: valid_target
+        to_triggering_node: true
+
+  # ---------------------------------------------------------------------------
+  # CANNON SELECTOR — fires every 15 min, picks one random valid_target node
+  # ---------------------------------------------------------------------------
+
+  - label: cannon_selector
+    trigger:
+      type: time_window
+      start: "2020-01-01T00:00:00"
+      end:   "2099-01-01T00:00:00"
+    auto_recur: true
+    recur_mins: 15
+    exceptions:
+      - kind: zone_has_flag
+        flag: game_over
+        target: chattanooga_fringe_a
+    responses:
+      - type: with_node
+        to_all_with_flag: valid_target
+        random_n: 1
+        responses:
+          - type: create_waypoint
+            expiry_mins: 15
+            initial_flags:
+              - laser_target
+          - type: send_message
+            message_label: target_locked
+            to_channel: comms
+
+  # ---------------------------------------------------------------------------
+  # BLAST EVENT — fires when laser_target expires; 95% hit, 5% misfire
+  # ---------------------------------------------------------------------------
+
+  - label: blast_event
+    trigger:
+      type: flag_expired
+      flag_label: laser_target
+      target_kind: dynamic_waypoint
+    exceptions:
+      - kind: zone_has_flag
+        flag: game_over
+        target: chattanooga_fringe_a
+    responses:
+      - type: random_options
+        options:
+          - weight: 95
+            responses:
+              - type: add_flag
+                flag_label: in_blast_zone
+                to_all_near_triggering_waypoint:
+                  meters: 8047
+              - type: random_options
+                options:
+                  - weight: 1
+                    responses:
+                      - type: send_message
+                        message_label: blast_msg_1
+                        to_channel: comms
+                  - weight: 1
+                    responses:
+                      - type: send_message
+                        message_label: blast_msg_2
+                        to_channel: comms
+                  - weight: 1
+                    responses:
+                      - type: send_message
+                        message_label: blast_msg_3
+                        to_channel: comms
+                  - weight: 1
+                    responses:
+                      - type: send_message
+                        message_label: blast_msg_4
+                        to_channel: comms
+                  - weight: 1
+                    responses:
+                      - type: send_message
+                        message_label: blast_msg_5
+                        to_channel: comms
+          - weight: 5
+            responses:
+              - type: send_message
+                message_label: misfire_msg
+                to_channel: comms
+
+  # ---------------------------------------------------------------------------
+  # NODE DESTROYED — fires per node when in_blast_zone expires
+  # ---------------------------------------------------------------------------
+
+  - label: node_destroyed
+    trigger:
+      type: flag_expired
+      flag_label: in_blast_zone
+      target_kind: node
+    trigger_per_node: true
+    exceptions:
+      - kind: node_has_flag
+        flag: destroyed
+      - kind: zone_has_flag
+        flag: game_over
+        target: chattanooga_fringe_a
+    responses:
+      - type: add_flag
+        flag_label: destroyed
+        to_triggering_node: true
+      - type: remove_flag
+        flag_label: valid_target
+        to_triggering_node: true
+      - type: increment_variable
+        variable_label: destroyed_count
+        amount: 1
+      - type: random_options
+        options:
+          - weight: 1
+            responses:
+              - type: send_message
+                message_label: obliterated_1
+                to_channel: comms
+          - weight: 1
+            responses:
+              - type: send_message
+                message_label: obliterated_2
+                to_channel: comms
+          - weight: 1
+            responses:
+              - type: send_message
+                message_label: obliterated_3
+                to_channel: comms
+          - weight: 1
+            responses:
+              - type: send_message
+                message_label: obliterated_4
+                to_channel: comms
+          - weight: 1
+            responses:
+              - type: send_message
+                message_label: obliterated_5
+                to_channel: comms
+
+  # ---------------------------------------------------------------------------
+  # STATUS UPDATE — broadcast active/destroyed counts every 60 minutes
+  # ---------------------------------------------------------------------------
+
+  - label: status_update
+    trigger:
+      type: time_window
+      start: "2020-01-01T00:00:00"
+      end:   "2099-01-01T00:00:00"
+    auto_recur: true
+    recur_mins: 60
+    exceptions:
+      - kind: zone_has_flag
+        flag: game_over
+        target: chattanooga_fringe_a
+    responses:
+      - type: send_message
+        message_label: status_msg
+        to_channel: comms
+
+  # ---------------------------------------------------------------------------
+  # LAST SURVIVOR — valid_target_count drops to 1
+  # ---------------------------------------------------------------------------
+
+  - label: last_survivor
+    trigger:
+      type: variable_threshold
+      variable: valid_target_count
+      operator: eq
+      value: 1
+    max_triggers: 1
+    exceptions:
+      - kind: zone_has_flag
+        flag: game_over
+        target: chattanooga_fringe_a
+    responses:
+      - type: add_flag
+        flag_label: game_over
+        to_zone: chattanooga_fringe_a
+      - type: disable_event
+        event_label: cannon_selector
+      - type: disable_event
+        event_label: status_update
+      - type: send_message
+        message_label: last_survivor_msg
+        to_channel: comms
+
+  # ---------------------------------------------------------------------------
+  # EVERYONE LOSES — valid_target_count drops to 0
+  # ---------------------------------------------------------------------------
+
+  - label: everyone_loses
+    trigger:
+      type: variable_threshold
+      variable: valid_target_count
+      operator: eq
+      value: 0
+    max_triggers: 1
+    exceptions:
+      - kind: zone_has_flag
+        flag: game_over
+        target: chattanooga_fringe_a
+    responses:
+      - type: add_flag
+        flag_label: game_over
+        to_zone: chattanooga_fringe_a
+      - type: disable_event
+        event_label: cannon_selector
+      - type: disable_event
+        event_label: status_update
+      - type: send_message
+        message_label: everyone_dead_msg
+        to_channel: comms
