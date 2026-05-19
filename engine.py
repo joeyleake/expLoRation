@@ -128,6 +128,15 @@ class Engine:
 
         # Tracks which zone labels each node is currently inside, for transition detection
         self._node_zones: dict[str, frozenset[str]] = {}
+        self._suppress_messages = False
+
+    def seed_node_location(self, node_id: str, lat: float, lon: float) -> None:
+        """Process a node's starting location through the normal event pipeline but suppress all outbound messages."""
+        self._suppress_messages = True
+        try:
+            self.handle_position(node_id, lat, lon)
+        finally:
+            self._suppress_messages = False
 
     def _sender_loop(self) -> None:
         while True:
@@ -369,7 +378,19 @@ class Engine:
         elif isinstance(t, VariableThresholdTrigger):
             var_def = self._mutable_var_defs.get(t.variable_label)
             if var_def is None:
-                return False
+                computed_var = self._get_variable(t.variable_label)
+                if computed_var is None:
+                    return False
+                triggering_node_id = getattr(ctx, "node_id", None)
+                raw_str = self._resolve_variable(computed_var, triggering_node_id)
+                try:
+                    raw: int | float | str = int(raw_str)
+                except ValueError:
+                    try:
+                        raw = float(raw_str)
+                    except ValueError:
+                        raw = raw_str
+                return self._evaluate_threshold(raw, t.operator, t.value)
             if var_def.scope == "node":
                 if not isinstance(ctx, (NodeContext, MessageContext)):
                     return False
@@ -529,12 +550,19 @@ class Engine:
     def _execute_response(self, resp, ctx: Context) -> None:
         node_id = ctx.node_id if isinstance(ctx, (NodeContext, MessageContext, ExpiryContext)) else None
         wp_id = getattr(ctx, "triggering_waypoint_id", None)
+        entered_zones = ctx.entered_zones if isinstance(ctx, NodeContext) else frozenset()
+        if entered_zones:
+            zone_id = next(iter(entered_zones))
+        elif node_id and self._node_zones.get(node_id):
+            zone_id = next(iter(self._node_zones[node_id]))
+        else:
+            zone_id = None
 
         if isinstance(resp, SendMessageResponse):
             message = self._get_message(resp.message_label)
             if message is None:
                 return
-            text = self._interpolate(message.text, node_id)
+            text = self._interpolate(message.text, node_id, zone_id)
             if isinstance(resp.target, TargetChannel):
                 self._send_channel(resp.target.channel_label, text)
             else:
@@ -839,6 +867,8 @@ class Engine:
     # ------------------------------------------------------------------
 
     def _send_dm(self, node_id: str, text: str) -> None:
+        if self._suppress_messages:
+            return
         try:
             dest = int(node_id.lstrip("!"), 16)
         except ValueError:
@@ -851,6 +881,8 @@ class Engine:
             self._send_queue.put(_fn)
 
     def _send_channel(self, channel_label: str, text: str) -> None:
+        if self._suppress_messages:
+            return
         idx = self.channel_index_map.get(channel_label)
         if idx is None:
             log.warning("Channel %r not mapped to a device index", channel_label)
@@ -876,9 +908,13 @@ class Engine:
     # Config lookups
     # ------------------------------------------------------------------
 
-    def _interpolate(self, text: str, triggering_node_id: str | None) -> str:
+    def _interpolate(self, text: str, triggering_node_id: str | None, triggering_zone: str | None = None) -> str:
         def replace(m: re.Match) -> str:
             label = m.group(1)
+            if label == "node_id":
+                return triggering_node_id or "[unknown]"
+            if label == "zone":
+                return triggering_zone or "[unknown]"
             var = self._get_variable(label)
             if var is not None:
                 return self._resolve_variable(var, triggering_node_id)
