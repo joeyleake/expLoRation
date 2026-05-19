@@ -227,7 +227,7 @@ def on_connection(interface, engine: Engine, config) -> None:
             located[hex_id] = coords
 
     for node_id, (lat, lon) in located.items():
-        engine.state.update_node_location(node_id, lat, lon)
+        engine.seed_node_location(node_id, lat, lon)
     if located:
         log.info("Seeded %d node locations from device", len(located))
 
@@ -273,7 +273,7 @@ def parse_args() -> argparse.Namespace:
                    help="Trigger/flag check interval in seconds (default: 60)")
     p.add_argument("--status-interval", type=int, default=300, metavar="SECS",
                    help="Console status display interval in seconds (0 to disable, default: 300)")
-    p.add_argument("--send-delay", type=float, default=1.5, metavar="SECS",
+    p.add_argument("--send-delay", type=float, default=4.0, metavar="SECS",
                    help="Delay in seconds between outgoing transmissions (default: 1.5)")
     p.add_argument("--verbose", action="store_true",
                    help="Print all location updates with zone proximity")

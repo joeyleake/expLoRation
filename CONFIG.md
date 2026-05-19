@@ -549,9 +549,11 @@ events:
 
 | Field | Required | Description |
 |---|---|---|
-| `variable` | yes | Label of a `mutable_variables:` entry |
+| `variable` | yes | Label of a `mutable_variables:` **or** `variables:` (computed) entry |
 | `operator` | yes | Comparison operator (see table below) |
 | `value` | yes | Threshold to compare against. Must be type-compatible with the variable |
+
+Computed variables resolve their current value at evaluation time (e.g. `flag_count` returns the live count). String mutable variables only support `eq` / `neq`; numeric mutable and computed variables support all operators.
 
 **Operators:**
 
@@ -579,6 +581,15 @@ messages:
 ```
 
 For `scope: node` variables, the value interpolated is the triggering node's value.
+
+### Built-in interpolation tokens
+
+Two tokens are always available in message text without being declared as variables:
+
+| Token | Resolves to |
+|---|---|
+| `{node_id}` | The triggering node's ID (e.g. `!6984ec24`). Useful in `enters_zone`, `flag_expired + target_kind: node`, and any node-context event. Resolves to `[unknown]` if there is no node context. |
+| `{zone}` | A zone the triggering node is currently in. In `enters_zone` events this is the entered zone. In other node-context events (including `with_node` inner responses) it falls back to the node's last known zone. Resolves to `[unknown]` if the node has no known zone. |
 
 ### Worked example: HP system
 

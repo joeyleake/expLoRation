@@ -766,11 +766,14 @@ def _validate(cfg: GameConfig) -> None:
 
         elif isinstance(t, VariableThresholdTrigger):
             _THRESHOLD_OPS = ("lt", "lte", "eq", "neq", "gte", "gt")
-            if t.variable_label not in mutable_var_labels:
-                raise ConfigError(f"{ctx} trigger: variable {t.variable_label!r} not in mutable_variables")
+            if t.variable_label not in mutable_var_labels and t.variable_label not in variable_labels:
+                raise ConfigError(
+                    f"{ctx} trigger: variable {t.variable_label!r} not in variables or mutable_variables"
+                )
             if t.operator not in _THRESHOLD_OPS:
                 raise ConfigError(f"{ctx} trigger: operator must be one of {_THRESHOLD_OPS}")
-            if mutable_var_def_map[t.variable_label].type == "string" and t.operator not in ("eq", "neq"):
+            if t.variable_label in mutable_var_def_map and \
+                    mutable_var_def_map[t.variable_label].type == "string" and t.operator not in ("eq", "neq"):
                 raise ConfigError(f"{ctx} trigger: string variables only support eq/neq operators")
 
         elif isinstance(t, FlagExpiryTrigger):
@@ -930,10 +933,11 @@ def _validate(cfg: GameConfig) -> None:
             raise ConfigError(f"{vctx}: unknown tracks value {var.tracks!r}")
 
     all_variable_labels = variable_labels | mutable_var_labels
+    _BUILTIN_TOKENS = frozenset({"node_id", "zone"})
     _VAR_TOKEN_RE = re.compile(r'\{(\w+)\}')
     for msg in cfg.messages:
         for token in _VAR_TOKEN_RE.findall(msg.text):
-            if token not in all_variable_labels:
+            if token not in all_variable_labels and token not in _BUILTIN_TOKENS:
                 raise ConfigError(
                     f"Message {msg.label!r}: interpolation token '{{{token}}}' not defined in variables"
                 )
