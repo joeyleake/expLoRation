@@ -219,7 +219,8 @@ class Engine:
         for event in self.config.events:
             if isinstance(event.trigger, VariableThresholdTrigger):
                 var_def = self._mutable_var_defs.get(event.trigger.variable_label)
-                if var_def and var_def.scope == "global":
+                # var_def is None for computed variables (from variables:) — check those in periodic too
+                if var_def is None or var_def.scope == "global":
                     if self._should_fire(event, ctx):
                         self._fire_event(event, ctx)
 
