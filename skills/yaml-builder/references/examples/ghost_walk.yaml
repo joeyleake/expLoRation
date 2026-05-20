@@ -1,0 +1,327 @@
+# expLoRation — Haunted History Walk
+#
+# A self-guided ghost tour of a fictional historic district.
+# Visitors carry Meshtastic nodes and receive atmospheric story
+# fragments as they approach points of interest — no staff required.
+#
+# The experience is entirely driven by proximity. Each site delivers
+# a piece of a larger mystery narrative. Visitors who reach all five
+# sites unlock a final revelation message.
+#
+# Designed to work at walking pace in an urban or park environment.
+# Replace coordinates and story text with your actual location and lore.
+#
+# Tip: pair with a printed map that marks the five sites by name only,
+# giving no indication of order — let visitors discover the narrative
+# thread naturally.
+
+channels:
+  - label: ghost_tour
+    name: GhostTour
+    psk: AQ==
+    monitor: true
+    participate: true
+
+# ---------------------------------------------------------------------------
+# Waypoints — five points of interest
+# ---------------------------------------------------------------------------
+waypoints:
+  - label: old_mill
+    lat: 34.1320
+    lon: -84.4410
+
+  - label: churchyard
+    lat: 34.1345
+    lon: -84.4390
+
+  - label: manor_gates
+    lat: 34.1360
+    lon: -84.4430
+
+  - label: collapsed_bridge
+    lat: 34.1305
+    lon: -84.4450
+
+  - label: well_house
+    lat: 34.1335
+    lon: -84.4470
+
+# ---------------------------------------------------------------------------
+# Zones — entry zone where the tour begins and nodes are registered
+# ---------------------------------------------------------------------------
+zones:
+  - label: tour_start_a
+    points:
+      - [34.1315, -84.4405]
+      - [34.1305, -84.4405]
+      - [34.1305, -84.4395]
+
+  - label: tour_start_b
+    points:
+      - [34.1315, -84.4405]
+      - [34.1315, -84.4395]
+      - [34.1305, -84.4395]
+
+# ---------------------------------------------------------------------------
+# Nodes — tour operators (excluded from story triggers)
+# ---------------------------------------------------------------------------
+nodes:
+  - label: tour_operator
+    node_id: "!deadbeef"
+    initial_flags:
+      - staff
+
+# ---------------------------------------------------------------------------
+# Flags
+# ---------------------------------------------------------------------------
+flags:
+  - label: staff
+  - label: tour_active         # set when visitor enters start zone
+  - label: visited_mill
+  - label: visited_churchyard
+  - label: visited_manor
+  - label: visited_bridge
+  - label: visited_well
+  - label: received_revelation  # seen all five sites
+
+# ---------------------------------------------------------------------------
+# Variables
+# ---------------------------------------------------------------------------
+variables:
+  - label: active_visitors
+    scope: global
+    tracks: flag_count
+    target: tour_active
+
+  - label: revelation_count
+    scope: global
+    tracks: flag_count
+    target: received_revelation
+
+# ---------------------------------------------------------------------------
+# Messages
+# ---------------------------------------------------------------------------
+messages:
+  - label: tour_welcome
+    text: |
+      🕯️  Welcome to the Hollow Creek Ghost Walk.
+      Five sites. Five stories. One truth hidden between them.
+      Your device will speak when you draw near.
+      Begin wherever the darkness calls you.
+
+  - label: mill_story
+    text: |
+      ⚙️  THE OLD MILL — Site 1 of 5
+      The wheel stopped turning on the night of October 14th, 1887.
+      Three workers went in for the evening shift. Only the foreman
+      came out, and he never spoke again. The millstone still bears
+      a stain no amount of scrubbing has ever lifted.
+      [ visited_mill unlocked ]
+
+  - label: churchyard_story
+    text: |
+      ✝️  THE CHURCHYARD — Site 2 of 5
+      Fourteen graves here bear the same death date.
+      The parish records list the cause simply as "the cold."
+      But November of 1887 was the warmest on record.
+      One headstone faces the wrong direction. Nobody knows why.
+      Nobody has moved it.
+      [ visited_churchyard unlocked ]
+
+  - label: manor_story
+    text: |
+      🏚️  THE MANOR GATES — Site 3 of 5
+      The Ashford family left on a Wednesday morning and never returned.
+      Breakfast was still on the table when the constables arrived.
+      The youngest daughter's music box was found wound tight,
+      still playing, three weeks later.
+      [ visited_manor unlocked ]
+
+  - label: bridge_story
+    text: |
+      🌉  THE COLLAPSED BRIDGE — Site 4 of 5
+      It fell on the same night the mill went silent.
+      The official report blamed rot. But the timber was oak —
+      less than twenty years old. Whatever crossed this bridge
+      that night was heavier than anything with a name.
+      [ visited_bridge unlocked ]
+
+  - label: well_story
+    text: |
+      🪣  THE WELL HOUSE — Site 5 of 5
+      They sealed the well in 1888 and built the stone house over it.
+      The mason who did the work refused payment. He said the well
+      had spoken to him. He said it knew his name.
+      You have found all five sites. The truth is assembling itself.
+      [ visited_well unlocked ]
+
+  - label: revelation
+    text: |
+      🕯️  THE REVELATION
+      You've walked where they walked. Heard what remains.
+      The mill. The churchyard. The manor. The bridge. The well.
+      They are not five places. They are five points of a single shape —
+      a boundary, drawn in 1887, meant to keep something inside.
+      Look at your map. Draw the lines.
+      What does the shape contain?
+      Thank you for walking with us tonight.
+      Active visitors on the walk right now: {active_visitors}
+
+
+# ---------------------------------------------------------------------------
+# Events
+# ---------------------------------------------------------------------------
+events:
+  - label: tour_welcome_event
+    trigger:
+      type: enters_zone
+      target: tour_start_a
+    trigger_per_node: true
+    responses:
+      - type: add_flag
+        flag_label: tour_active
+        to_triggering_node: true
+      - type: send_message
+        message_label: tour_welcome
+        to_triggering_node: true
+    exceptions:
+      - kind: node_has_flag
+        flag: staff
+      - kind: node_has_flag
+        flag: tour_active
+    max_triggers: 1
+
+  # Site 1 — Old Mill
+  - label: visit_mill
+    trigger:
+      type: near_waypoint
+      target: old_mill
+      meters: 30
+    trigger_per_node: true
+    responses:
+      - type: add_flag
+        flag_label: visited_mill
+        to_triggering_node: true
+      - type: send_message
+        message_label: mill_story
+        to_triggering_node: true
+    exceptions:
+      - kind: node_has_flag
+        flag: staff
+      - kind: node_has_flag
+        flag: visited_mill
+    max_triggers: 1
+
+  # Site 2 — Churchyard
+  - label: visit_churchyard
+    trigger:
+      type: near_waypoint
+      target: churchyard
+      meters: 30
+    trigger_per_node: true
+    responses:
+      - type: add_flag
+        flag_label: visited_churchyard
+        to_triggering_node: true
+      - type: send_message
+        message_label: churchyard_story
+        to_triggering_node: true
+    exceptions:
+      - kind: node_has_flag
+        flag: staff
+      - kind: node_has_flag
+        flag: visited_churchyard
+    max_triggers: 1
+
+  # Site 3 — Manor Gates
+  - label: visit_manor
+    trigger:
+      type: near_waypoint
+      target: manor_gates
+      meters: 30
+    trigger_per_node: true
+    responses:
+      - type: add_flag
+        flag_label: visited_manor
+        to_triggering_node: true
+      - type: send_message
+        message_label: manor_story
+        to_triggering_node: true
+    exceptions:
+      - kind: node_has_flag
+        flag: staff
+      - kind: node_has_flag
+        flag: visited_manor
+    max_triggers: 1
+
+  # Site 4 — Collapsed Bridge
+  - label: visit_bridge
+    trigger:
+      type: near_waypoint
+      target: collapsed_bridge
+      meters: 30
+    trigger_per_node: true
+    responses:
+      - type: add_flag
+        flag_label: visited_bridge
+        to_triggering_node: true
+      - type: send_message
+        message_label: bridge_story
+        to_triggering_node: true
+    exceptions:
+      - kind: node_has_flag
+        flag: staff
+      - kind: node_has_flag
+        flag: visited_bridge
+    max_triggers: 1
+
+  # Site 5 — Well House
+  - label: visit_well
+    trigger:
+      type: near_waypoint
+      target: well_house
+      meters: 30
+    trigger_per_node: true
+    responses:
+      - type: add_flag
+        flag_label: visited_well
+        to_triggering_node: true
+      - type: send_message
+        message_label: well_story
+        to_triggering_node: true
+    exceptions:
+      - kind: node_has_flag
+        flag: staff
+      - kind: node_has_flag
+        flag: visited_well
+    max_triggers: 1
+
+  # Revelation — fires when a node has visited all five sites
+  - label: send_revelation
+    trigger:
+      type: near_waypoint
+      target: old_mill      # re-checks on any proximity event; flag gates fire
+      meters: 500           # wide radius — fires on next location update
+    trigger_per_node: true
+    responses:
+      - type: add_flag
+        flag_label: received_revelation
+        to_triggering_node: true
+      - type: send_message
+        message_label: revelation
+        to_triggering_node: true
+    exceptions:
+      - kind: node_has_flag
+        flag: staff
+      - kind: node_has_flag
+        flag: received_revelation
+      - kind: node_lacks_flag
+        flag: visited_mill
+      - kind: node_lacks_flag
+        flag: visited_churchyard
+      - kind: node_lacks_flag
+        flag: visited_manor
+      - kind: node_lacks_flag
+        flag: visited_bridge
+      - kind: node_lacks_flag
+        flag: visited_well
