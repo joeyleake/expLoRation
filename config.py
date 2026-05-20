@@ -910,6 +910,9 @@ def _validate(cfg: GameConfig) -> None:
         elif var.tracks == "distance_to_waypoint":
             if var.target is None or var.target not in waypoint_labels:
                 raise ConfigError(f"{vctx} field 'target': must be a waypoint label")
+        elif var.tracks in ("prev_distance_to_waypoint", "distance_change_to_waypoint"):
+            if var.target is None or var.target not in waypoint_labels:
+                raise ConfigError(f"{vctx} field 'target': must be a waypoint label")
         elif var.tracks == "distance_to_zone":
             if var.target is None or var.target not in zone_labels:
                 raise ConfigError(f"{vctx} field 'target': must be a zone label")

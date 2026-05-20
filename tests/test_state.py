@@ -295,6 +295,37 @@ def test_expire_dynamic_waypoints(db):
     assert isinstance(flags, frozenset)
 
 
+# ---------------------------------------------------------------------------
+# Previous node locations
+# ---------------------------------------------------------------------------
+
+def test_get_prev_node_location_none_before_second_update(db):
+    db.update_node_location("!aa", 47.0, -122.0)
+    assert db.get_prev_node_location("!aa") is None
+
+
+def test_prev_node_location_set_on_second_update(db):
+    db.update_node_location("!aa", 47.0, -122.0)
+    db.update_node_location("!aa", 48.0, -121.0)
+    assert db.get_prev_node_location("!aa") == (47.0, -122.0)
+
+
+def test_prev_node_location_tracks_penultimate(db):
+    db.update_node_location("!aa", 47.0, -122.0)
+    db.update_node_location("!aa", 48.0, -121.0)
+    db.update_node_location("!aa", 49.0, -120.0)
+    assert db.get_prev_node_location("!aa") == (48.0, -121.0)
+    assert db.get_node_location("!aa") == (49.0, -120.0)
+
+
+def test_prev_node_location_independent_per_node(db):
+    db.update_node_location("!aa", 47.0, -122.0)
+    db.update_node_location("!aa", 48.0, -121.0)
+    db.update_node_location("!bb", 10.0, 10.0)
+    assert db.get_prev_node_location("!bb") is None
+    assert db.get_prev_node_location("!aa") == (47.0, -122.0)
+
+
 def test_dynamic_waypoint_count(db):
     db.create_dynamic_waypoint(47.0, -122.0)
     db.create_dynamic_waypoint(48.0, -121.0)
