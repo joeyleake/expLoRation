@@ -978,6 +978,32 @@ class Engine:
                 return "[unknown]"
             return str(round(geo.haversine(*node_loc, wp.lat, wp.lon)))
 
+        if var.tracks == "seconds_since_last_update":
+            if triggering_node_id is None:
+                return "[no node context]"
+            updated_at = self.state.get_node_location_updated_at(triggering_node_id)
+            if updated_at is None:
+                return "[unknown]"
+            from datetime import datetime, timezone
+            elapsed = datetime.now(timezone.utc) - datetime.fromisoformat(updated_at)
+            return str(int(elapsed.total_seconds()))
+
+        if var.tracks == "current_position":
+            if triggering_node_id is None:
+                return "[no node context]"
+            loc = located.get(triggering_node_id)
+            if loc is None:
+                return "[unknown]"
+            return f"{loc[0]:.5f}, {loc[1]:.5f}"
+
+        if var.tracks == "prev_position":
+            if triggering_node_id is None:
+                return "[no node context]"
+            loc = self.state.get_prev_node_location(triggering_node_id)
+            if loc is None:
+                return "[unknown]"
+            return f"{loc[0]:.5f}, {loc[1]:.5f}"
+
         if var.tracks == "prev_distance_to_waypoint":
             if triggering_node_id is None:
                 return "[no node context]"

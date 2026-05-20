@@ -927,6 +927,8 @@ def _validate(cfg: GameConfig) -> None:
                 raise ConfigError(f"{vctx} field 'target': must be a waypoint label for scope: waypoint")
             if var.node is None or var.node not in node_labels:
                 raise ConfigError(f"{vctx} field 'node': must be a node label")
+        elif var.tracks in ("seconds_since_last_update", "current_position", "prev_position"):
+            pass  # no target required — computed from triggering node's location history
         elif var.tracks in ("nearest_node_distance", "nearest_node_name"):
             if var.scope == "zone" and (var.target is None or var.target not in zone_labels):
                 raise ConfigError(f"{vctx} field 'target': must be a zone label for scope: zone")

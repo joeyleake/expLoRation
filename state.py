@@ -191,6 +191,13 @@ class GameState:
             )
             self._conn.commit()
 
+    def get_node_location_updated_at(self, node_id: str) -> str | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT updated_at FROM node_locations WHERE node_id=?", (node_id,)
+            ).fetchone()
+            return row["updated_at"] if row else None
+
     def get_prev_node_location(self, node_id: str) -> tuple[float, float] | None:
         with self._lock:
             row = self._conn.execute(
