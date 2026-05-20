@@ -562,37 +562,39 @@ trigger:
 #### `dm` — node sends a matching DM to the bot
 
 Fires when any node sends a direct message to the bot whose text matches a
-defined message, and that node is currently inside the specified zone.
+defined message. If `zone_label` is set, the sender must also be inside that
+zone. When omitted, the trigger fires for any node regardless of location.
 
 ```yaml
 trigger:
   type: dm
   message_label: hint_request    # messages label — text must match exactly
-  zone_label: start_zone         # zones label — sender must be inside this zone
+  zone_label: start_zone         # optional — restrict to senders inside this zone
 ```
 
 | Field | Required | Description |
 |---|---|---|
 | `message_label` | yes | A `messages` label. The incoming DM text is compared to `message.text` after stripping whitespace. |
-| `zone_label` | yes | A `zones` label. The sender must have a known location inside this zone. |
+| `zone_label` | no | A `zones` label. If set, the sender must have a known location inside this zone. Omit to allow any node to trigger. |
 
 #### `channel` — node sends a matching message on a monitored channel
 
 Fires when any node broadcasts a message on a specific channel whose text
-matches a defined message, and that node is currently inside the specified zone.
+matches a defined message. If `zone_label` is set, the sender must also be
+inside that zone.
 
 ```yaml
 trigger:
   type: channel
   message_label: activation_code
-  zone_label: clue_zone
+  zone_label: clue_zone          # optional — restrict to senders inside this zone
   channel_label: main            # channels label — message must arrive on this channel
 ```
 
 | Field | Required | Description |
 |---|---|---|
 | `message_label` | yes | A `messages` label |
-| `zone_label` | yes | A `zones` label — sender must be inside this zone |
+| `zone_label` | no | A `zones` label — if set, sender must be inside this zone |
 | `channel_label` | yes | A `channels` label — message must arrive on this channel |
 
 ---
