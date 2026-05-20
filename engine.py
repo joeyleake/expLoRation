@@ -909,7 +909,13 @@ class Engine:
             log.warning("Invalid node_id for location request: %r", node_id)
             return
         def _fn(d=dest):
-            self.interface.sendText("", destinationId=d, wantResponse=True)
+            from meshtastic import portnums_pb2
+            self.interface.sendData(
+                data=b"",
+                destinationId=d,
+                portNum=portnums_pb2.PortNum.POSITION_APP,
+                wantResponse=True,
+            )
             log.info("Location request → %s", node_id)
         self._send_queue.put(_fn)
 

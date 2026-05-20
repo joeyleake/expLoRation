@@ -250,6 +250,8 @@ class RequestLocationResponse:
     target: Target
 
 
+
+
 @dataclass
 class SetEventTriggersResponse:
     event_label: str
