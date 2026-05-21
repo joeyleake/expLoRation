@@ -978,6 +978,18 @@ class Engine:
                 return "[unknown]"
             return str(round(geo.haversine(*node_loc, wp.lat, wp.lon)))
 
+        if var.tracks in ("bearing_to_waypoint", "cardinal_to_waypoint"):
+            if triggering_node_id is None:
+                return "[no node context]"
+            node_loc = located.get(triggering_node_id)
+            wp = self._get_waypoint(var.target)
+            if node_loc is None or wp is None:
+                return "[unknown]"
+            deg = geo.bearing(*node_loc, wp.lat, wp.lon)
+            if var.tracks == "bearing_to_waypoint":
+                return f"{round(deg)}°"
+            return geo.bearing_to_cardinal(deg)
+
         if var.tracks == "seconds_since_last_update":
             if triggering_node_id is None:
                 return "[no node context]"

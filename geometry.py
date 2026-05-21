@@ -16,6 +16,24 @@ def haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
 
+_CARDINALS = ["N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE",
+               "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW"]
+
+
+def bearing(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Return forward bearing in degrees (0–360) from point 1 to point 2."""
+    lat1, lat2 = math.radians(lat1), math.radians(lat2)
+    dlon = math.radians(lon2 - lon1)
+    x = math.sin(dlon) * math.cos(lat2)
+    y = math.cos(lat1) * math.sin(lat2) - math.sin(lat1) * math.cos(lat2) * math.cos(dlon)
+    return (math.degrees(math.atan2(x, y)) + 360) % 360
+
+
+def bearing_to_cardinal(degrees: float) -> str:
+    """Return the nearest 16-point compass label for a bearing in degrees."""
+    return _CARDINALS[round(degrees / 22.5) % 16]
+
+
 def _cross(o, a, b) -> float:
     return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
 

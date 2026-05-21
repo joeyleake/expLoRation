@@ -640,6 +640,311 @@ def test_distance_change_unknown_without_prev(db):
 
 
 # ---------------------------------------------------------------------------
+# seconds_since_last_update / current_position / prev_position variable tracks
+# ---------------------------------------------------------------------------
+
+def test_seconds_since_last_update_resolves_numeric(db):
+    """seconds_since_last_update returns a numeric string after a position update."""
+    from config import Variable, Message
+    cfg = minimal_config(
+        messages=[
+            Message(label="hello", text="Hello world"),
+            Message(label="greet_node", text="Hi {node_id}"),
+            Message(label="greet_zone", text="Zone: {zone}"),
+            Message(label="age_msg", text="age:{age}"),
+        ],
+        variables=[
+            Variable(label="active_count", scope="global", tracks="flag_count", target="active"),
+            Variable(label="age", scope="node", tracks="seconds_since_last_update"),
+        ],
+        events=[
+            Event(
+                label="zone_ev",
+                trigger=ProximityTrigger(kind="enters_zone", target_label="zone_a"),
+                responses=[SendMessageResponse(message_label="age_msg", target=TargetTriggeringNode())],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db)
+    eng.handle_position(NODE_ID, *OUTSIDE_ZONE)
+    eng.handle_position(NODE_ID, *INSIDE_ZONE)
+
+    text = eng.sent_dms[0][1]
+    assert "[unknown]" not in text
+    value = text.split("age:")[1]
+    assert value.isdigit()
+
+
+def test_current_and_prev_position_resolve(db):
+    """current_position and prev_position return formatted coordinate strings."""
+    from config import Variable, Message
+    cfg = minimal_config(
+        messages=[
+            Message(label="hello", text="Hello world"),
+            Message(label="greet_node", text="Hi {node_id}"),
+            Message(label="greet_zone", text="Zone: {zone}"),
+            Message(label="pos_msg", text="cur:{cur} prev:{prev}"),
+        ],
+        variables=[
+            Variable(label="active_count", scope="global", tracks="flag_count", target="active"),
+            Variable(label="cur", scope="node", tracks="current_position"),
+            Variable(label="prev", scope="node", tracks="prev_position"),
+        ],
+        events=[
+            Event(
+                label="zone_ev",
+                trigger=ProximityTrigger(kind="enters_zone", target_label="zone_a"),
+                responses=[SendMessageResponse(message_label="pos_msg", target=TargetTriggeringNode())],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db)
+    eng.handle_position(NODE_ID, *OUTSIDE_ZONE)   # becomes prev
+    eng.handle_position(NODE_ID, *INSIDE_ZONE)    # becomes cur, enters zone
+
+    text = eng.sent_dms[0][1]
+    assert "[unknown]" not in text
+    # Both should look like "lat, lon"
+    assert "," in text.split("cur:")[1].split(" prev:")[0]
+    assert "," in text.split("prev:")[1]
+
+
+def test_prev_position_unknown_on_first_update(db):
+    """prev_position returns [unknown] when the node has no prior position."""
+    from config import Variable, Message
+    cfg = minimal_config(
+        messages=[
+            Message(label="hello", text="Hello world"),
+            Message(label="greet_node", text="Hi {node_id}"),
+            Message(label="greet_zone", text="Zone: {zone}"),
+            Message(label="pos_msg", text="prev:{prev}"),
+        ],
+        variables=[
+            Variable(label="active_count", scope="global", tracks="flag_count", target="active"),
+            Variable(label="prev", scope="node", tracks="prev_position"),
+        ],
+        events=[
+            Event(
+                label="zone_ev",
+                trigger=ProximityTrigger(kind="enters_zone", target_label="zone_a"),
+                responses=[SendMessageResponse(message_label="pos_msg", target=TargetTriggeringNode())],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db)
+    eng.handle_position(NODE_ID, *INSIDE_ZONE)  # first update ever
+
+    assert eng.sent_dms[0][1] == "prev:[unknown]"
+
+
+# ---------------------------------------------------------------------------
+# variable_threshold: skip when computed value is non-numeric
+# ---------------------------------------------------------------------------
+
+def test_variable_threshold_skips_when_distance_change_unknown(db):
+    """variable_threshold on distance_change_to_waypoint does not fire on first
+    position update when there is no previous position ([unknown] returned)."""
+    from config import Variable
+    cfg = minimal_config(
+        variables=[
+            Variable(label="active_count", scope="global", tracks="flag_count", target="active"),
+            Variable(label="delta", scope="node", tracks="distance_change_to_waypoint", target="wp_a"),
+        ],
+        events=[
+            Event(
+                label="closer_ev",
+                trigger=VariableThresholdTrigger(variable_label="delta", operator="lt", value=0),
+                responses=[AddFlagResponse(flag_label="active", target=TargetTriggeringNode())],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db)
+    eng.handle_position(NODE_ID, *INSIDE_ZONE)  # first update — no prev, delta=[unknown]
+
+    assert not db.has_flag("node", NODE_ID, "active")
+
+
+# ---------------------------------------------------------------------------
+# variable_threshold fires during handle_message for node-scoped computed vars
+# ---------------------------------------------------------------------------
+
+def test_variable_threshold_fires_on_dm_for_computed_node_var(db):
+    """A variable_threshold on a node-scoped computed variable evaluates at DM
+    receipt time, enabling patterns like the stale-location refresh."""
+    from config import Variable, Message, RequestLocationResponse
+    cfg = minimal_config(
+        messages=[
+            Message(label="hello", text="Hello world"),
+            Message(label="greet_node", text="Hi {node_id}"),
+            Message(label="greet_zone", text="Zone: {zone}"),
+            Message(label="ping", text="!ping"),
+        ],
+        variables=[
+            Variable(label="active_count", scope="global", tracks="flag_count", target="active"),
+            Variable(label="staleness", scope="node", tracks="seconds_since_last_update"),
+        ],
+        events=[
+            Event(
+                label="stale_refresh",
+                trigger=VariableThresholdTrigger(
+                    variable_label="staleness", operator="gte", value=0
+                ),
+                trigger_per_node=True,
+                responses=[AddFlagResponse(flag_label="active", target=TargetTriggeringNode())],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db)
+    eng.handle_position(NODE_ID, *INSIDE_ZONE)  # give node a known location + timestamp
+
+    # threshold (gte 0) will always be true once a position is known;
+    # verify it fires when a DM arrives, not just on position/periodic
+    eng.handle_message(NODE_ID, "!ping", is_dm=True, channel_idx=0)
+
+    assert db.has_flag("node", NODE_ID, "active")
+
+
+# ---------------------------------------------------------------------------
+# bearing_to_waypoint / cardinal_to_waypoint variable tracks
+# ---------------------------------------------------------------------------
+
+def test_bearing_to_waypoint_format(db):
+    """bearing_to_waypoint returns a string of the form '<int>°'."""
+    from config import Variable, Message
+    cfg = minimal_config(
+        messages=[
+            Message(label="hello", text="Hello world"),
+            Message(label="greet_node", text="Hi {node_id}"),
+            Message(label="greet_zone", text="Zone: {zone}"),
+            Message(label="b_msg", text="b:{bearing}"),
+        ],
+        variables=[
+            Variable(label="active_count", scope="global", tracks="flag_count", target="active"),
+            Variable(label="bearing", scope="node", tracks="bearing_to_waypoint", target="wp_a"),
+        ],
+        events=[
+            Event(
+                label="zone_ev",
+                trigger=ProximityTrigger(kind="enters_zone", target_label="zone_a"),
+                responses=[SendMessageResponse(message_label="b_msg", target=TargetTriggeringNode())],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db)
+    eng.handle_position(NODE_ID, *OUTSIDE_ZONE)
+    eng.handle_position(NODE_ID, *INSIDE_ZONE)
+
+    bearing_str = eng.sent_dms[0][1].split("b:")[1]
+    assert bearing_str.endswith("°")
+    assert bearing_str[:-1].isdigit()
+    assert 0 <= int(bearing_str[:-1]) <= 359
+
+
+def test_cardinal_to_waypoint_valid(db):
+    """cardinal_to_waypoint returns one of the 16 compass labels."""
+    from config import Variable, Message
+    valid = {"N","NNE","NE","ENE","E","ESE","SE","SSE","S","SSW","SW","WSW","W","WNW","NW","NNW"}
+    cfg = minimal_config(
+        messages=[
+            Message(label="hello", text="Hello world"),
+            Message(label="greet_node", text="Hi {node_id}"),
+            Message(label="greet_zone", text="Zone: {zone}"),
+            Message(label="c_msg", text="c:{cardinal}"),
+        ],
+        variables=[
+            Variable(label="active_count", scope="global", tracks="flag_count", target="active"),
+            Variable(label="cardinal", scope="node", tracks="cardinal_to_waypoint", target="wp_a"),
+        ],
+        events=[
+            Event(
+                label="zone_ev",
+                trigger=ProximityTrigger(kind="enters_zone", target_label="zone_a"),
+                responses=[SendMessageResponse(message_label="c_msg", target=TargetTriggeringNode())],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db)
+    eng.handle_position(NODE_ID, *OUTSIDE_ZONE)
+    eng.handle_position(NODE_ID, *INSIDE_ZONE)
+
+    cardinal_str = eng.sent_dms[0][1].split("c:")[1]
+    assert cardinal_str in valid
+
+
+def test_bearing_to_waypoint_due_east(db):
+    """A waypoint due east of the node returns bearing ~90° and cardinal 'E'."""
+    from config import Variable, Message, Waypoint
+    # wp_east is at the same latitude as INSIDE_ZONE but clearly to the east
+    inside_lat, inside_lon = INSIDE_ZONE
+    cfg = minimal_config(
+        waypoints=[
+            Waypoint(label="wp_a", lat=47.005, lon=-122.005),
+            Waypoint(label="wp_east", lat=inside_lat, lon=inside_lon + 1.0),
+        ],
+        messages=[
+            Message(label="hello", text="Hello world"),
+            Message(label="greet_node", text="Hi {node_id}"),
+            Message(label="greet_zone", text="Zone: {zone}"),
+            Message(label="bc_msg", text="b:{bearing} c:{cardinal}"),
+        ],
+        variables=[
+            Variable(label="active_count", scope="global", tracks="flag_count", target="active"),
+            Variable(label="bearing", scope="node", tracks="bearing_to_waypoint", target="wp_east"),
+            Variable(label="cardinal", scope="node", tracks="cardinal_to_waypoint", target="wp_east"),
+        ],
+        events=[
+            Event(
+                label="zone_ev",
+                trigger=ProximityTrigger(kind="enters_zone", target_label="zone_a"),
+                responses=[SendMessageResponse(message_label="bc_msg", target=TargetTriggeringNode())],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db)
+    eng.handle_position(NODE_ID, *OUTSIDE_ZONE)
+    eng.handle_position(NODE_ID, *INSIDE_ZONE)
+
+    text = eng.sent_dms[0][1]
+    bearing_deg = int(text.split("b:")[1].split(" ")[0].rstrip("°"))
+    cardinal = text.split("c:")[1]
+    assert 80 <= bearing_deg <= 100, f"Expected ~90° for due-east waypoint, got {bearing_deg}°"
+    assert cardinal == "E"
+
+
+def test_bearing_unknown_without_position(db):
+    """bearing_to_waypoint and cardinal_to_waypoint return [unknown] when node has no location."""
+    from config import Variable, Message
+    cfg = minimal_config(
+        messages=[
+            Message(label="hello", text="Hello world"),
+            Message(label="greet_node", text="Hi {node_id}"),
+            Message(label="greet_zone", text="Zone: {zone}"),
+            Message(label="ping", text="!ping"),
+            Message(label="bc_msg", text="b:{bearing} c:{cardinal}"),
+        ],
+        variables=[
+            Variable(label="active_count", scope="global", tracks="flag_count", target="active"),
+            Variable(label="bearing", scope="node", tracks="bearing_to_waypoint", target="wp_a"),
+            Variable(label="cardinal", scope="node", tracks="cardinal_to_waypoint", target="wp_a"),
+        ],
+        events=[
+            Event(
+                label="ping_ev",
+                trigger=CommandTrigger(kind="dm", message_label="ping"),
+                responses=[SendMessageResponse(message_label="bc_msg", target=TargetTriggeringNode())],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db)
+    # No handle_position — node has no known location
+    eng.handle_message(NODE_ID, "!ping", is_dm=True, channel_idx=0)
+
+    text = eng.sent_dms[0][1]
+    assert "b:[unknown]" in text
+    assert "c:[unknown]" in text
+
+
+# ---------------------------------------------------------------------------
 # disable_event / enable_event responses
 # ---------------------------------------------------------------------------
 

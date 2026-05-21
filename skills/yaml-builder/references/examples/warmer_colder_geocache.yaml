@@ -131,6 +131,10 @@ variables:
     tracks: distance_change_to_waypoint
     target: geocache
 
+  - label: seconds_since_update
+    scope: node
+    tracks: seconds_since_last_update
+
 # ---------------------------------------------------------------------------
 # Events
 # ---------------------------------------------------------------------------
