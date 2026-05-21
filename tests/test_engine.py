@@ -805,6 +805,146 @@ def test_variable_threshold_fires_on_dm_for_computed_node_var(db):
 
 
 # ---------------------------------------------------------------------------
+# bearing_to_waypoint / cardinal_to_waypoint variable tracks
+# ---------------------------------------------------------------------------
+
+def test_bearing_to_waypoint_format(db):
+    """bearing_to_waypoint returns a string of the form '<int>°'."""
+    from config import Variable, Message
+    cfg = minimal_config(
+        messages=[
+            Message(label="hello", text="Hello world"),
+            Message(label="greet_node", text="Hi {node_id}"),
+            Message(label="greet_zone", text="Zone: {zone}"),
+            Message(label="b_msg", text="b:{bearing}"),
+        ],
+        variables=[
+            Variable(label="active_count", scope="global", tracks="flag_count", target="active"),
+            Variable(label="bearing", scope="node", tracks="bearing_to_waypoint", target="wp_a"),
+        ],
+        events=[
+            Event(
+                label="zone_ev",
+                trigger=ProximityTrigger(kind="enters_zone", target_label="zone_a"),
+                responses=[SendMessageResponse(message_label="b_msg", target=TargetTriggeringNode())],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db)
+    eng.handle_position(NODE_ID, *OUTSIDE_ZONE)
+    eng.handle_position(NODE_ID, *INSIDE_ZONE)
+
+    bearing_str = eng.sent_dms[0][1].split("b:")[1]
+    assert bearing_str.endswith("°")
+    assert bearing_str[:-1].isdigit()
+    assert 0 <= int(bearing_str[:-1]) <= 359
+
+
+def test_cardinal_to_waypoint_valid(db):
+    """cardinal_to_waypoint returns one of the 16 compass labels."""
+    from config import Variable, Message
+    valid = {"N","NNE","NE","ENE","E","ESE","SE","SSE","S","SSW","SW","WSW","W","WNW","NW","NNW"}
+    cfg = minimal_config(
+        messages=[
+            Message(label="hello", text="Hello world"),
+            Message(label="greet_node", text="Hi {node_id}"),
+            Message(label="greet_zone", text="Zone: {zone}"),
+            Message(label="c_msg", text="c:{cardinal}"),
+        ],
+        variables=[
+            Variable(label="active_count", scope="global", tracks="flag_count", target="active"),
+            Variable(label="cardinal", scope="node", tracks="cardinal_to_waypoint", target="wp_a"),
+        ],
+        events=[
+            Event(
+                label="zone_ev",
+                trigger=ProximityTrigger(kind="enters_zone", target_label="zone_a"),
+                responses=[SendMessageResponse(message_label="c_msg", target=TargetTriggeringNode())],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db)
+    eng.handle_position(NODE_ID, *OUTSIDE_ZONE)
+    eng.handle_position(NODE_ID, *INSIDE_ZONE)
+
+    cardinal_str = eng.sent_dms[0][1].split("c:")[1]
+    assert cardinal_str in valid
+
+
+def test_bearing_to_waypoint_due_east(db):
+    """A waypoint due east of the node returns bearing ~90° and cardinal 'E'."""
+    from config import Variable, Message, Waypoint
+    # wp_east is at the same latitude as INSIDE_ZONE but clearly to the east
+    inside_lat, inside_lon = INSIDE_ZONE
+    cfg = minimal_config(
+        waypoints=[
+            Waypoint(label="wp_a", lat=47.005, lon=-122.005),
+            Waypoint(label="wp_east", lat=inside_lat, lon=inside_lon + 1.0),
+        ],
+        messages=[
+            Message(label="hello", text="Hello world"),
+            Message(label="greet_node", text="Hi {node_id}"),
+            Message(label="greet_zone", text="Zone: {zone}"),
+            Message(label="bc_msg", text="b:{bearing} c:{cardinal}"),
+        ],
+        variables=[
+            Variable(label="active_count", scope="global", tracks="flag_count", target="active"),
+            Variable(label="bearing", scope="node", tracks="bearing_to_waypoint", target="wp_east"),
+            Variable(label="cardinal", scope="node", tracks="cardinal_to_waypoint", target="wp_east"),
+        ],
+        events=[
+            Event(
+                label="zone_ev",
+                trigger=ProximityTrigger(kind="enters_zone", target_label="zone_a"),
+                responses=[SendMessageResponse(message_label="bc_msg", target=TargetTriggeringNode())],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db)
+    eng.handle_position(NODE_ID, *OUTSIDE_ZONE)
+    eng.handle_position(NODE_ID, *INSIDE_ZONE)
+
+    text = eng.sent_dms[0][1]
+    bearing_deg = int(text.split("b:")[1].split(" ")[0].rstrip("°"))
+    cardinal = text.split("c:")[1]
+    assert 80 <= bearing_deg <= 100, f"Expected ~90° for due-east waypoint, got {bearing_deg}°"
+    assert cardinal == "E"
+
+
+def test_bearing_unknown_without_position(db):
+    """bearing_to_waypoint and cardinal_to_waypoint return [unknown] when node has no location."""
+    from config import Variable, Message
+    cfg = minimal_config(
+        messages=[
+            Message(label="hello", text="Hello world"),
+            Message(label="greet_node", text="Hi {node_id}"),
+            Message(label="greet_zone", text="Zone: {zone}"),
+            Message(label="ping", text="!ping"),
+            Message(label="bc_msg", text="b:{bearing} c:{cardinal}"),
+        ],
+        variables=[
+            Variable(label="active_count", scope="global", tracks="flag_count", target="active"),
+            Variable(label="bearing", scope="node", tracks="bearing_to_waypoint", target="wp_a"),
+            Variable(label="cardinal", scope="node", tracks="cardinal_to_waypoint", target="wp_a"),
+        ],
+        events=[
+            Event(
+                label="ping_ev",
+                trigger=CommandTrigger(kind="dm", message_label="ping"),
+                responses=[SendMessageResponse(message_label="bc_msg", target=TargetTriggeringNode())],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db)
+    # No handle_position — node has no known location
+    eng.handle_message(NODE_ID, "!ping", is_dm=True, channel_idx=0)
+
+    text = eng.sent_dms[0][1]
+    assert "b:[unknown]" in text
+    assert "c:[unknown]" in text
+
+
+# ---------------------------------------------------------------------------
 # disable_event / enable_event responses
 # ---------------------------------------------------------------------------
 

@@ -59,9 +59,29 @@ variables:
     tracks: distance_to_waypoint
     target: statue_of_liberty
 
+  - label: bearing_to_inside
+    scope: node
+    tracks: bearing_to_waypoint
+    target: statue_of_liberty
+
+  - label: cardinal_to_inside
+    scope: node
+    tracks: cardinal_to_waypoint
+    target: statue_of_liberty
+
   - label: dist_to_outside
     scope: node
     tracks: distance_to_waypoint
+    target: eiffel_tower
+
+  - label: bearing_to_outside
+    scope: node
+    tracks: bearing_to_waypoint
+    target: eiffel_tower
+
+  - label: cardinal_to_outside
+    scope: node
+    tracks: cardinal_to_waypoint
     target: eiffel_tower
 
   - label: seconds_ago
@@ -93,8 +113,8 @@ messages:
   - label: report_in_zone
     text: |
       Zone:     IN ✅
-      🗽:  {dist_to_inside}m
-      🗼: {dist_to_outside}m
+      🗽:  {dist_to_inside}m {bearing_to_inside} ({cardinal_to_inside})
+      🗼: {dist_to_outside}m {bearing_to_outside} ({cardinal_to_outside})
       Updated:  {seconds_ago}s ago
       Curr pos: {cur_pos}
       Prev pos: {prev_pos}
@@ -102,8 +122,8 @@ messages:
   - label: report_out_of_zone
     text: |
       Zone:     OUT ❌
-      🗽:  {dist_to_inside}m
-      🗼: {dist_to_outside}m
+      🗽:  {dist_to_inside}m {bearing_to_inside} ({cardinal_to_inside})
+      🗼: {dist_to_outside}m {bearing_to_outside} ({cardinal_to_outside})
       Updated:  {seconds_ago}s ago
       Curr pos: {cur_pos}
       Prev pos: {prev_pos}

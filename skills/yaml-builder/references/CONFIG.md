@@ -402,6 +402,40 @@ Primary use: `variable_threshold` trigger to set direction flags (warmer/colder)
       to_triggering_node: true
 ```
 
+#### `bearing_to_waypoint` — compass bearing to a waypoint
+
+Returns the forward bearing in whole degrees (0–359, formatted as e.g. `"247°"`)
+from the triggering node's current position to the target waypoint. 0° is north,
+90° is east. Returns `[unknown]` if the node has no known location.
+
+```yaml
+- label: bearing_to_cache
+  scope: node
+  tracks: bearing_to_waypoint
+  target: hidden_cache       # waypoint label
+```
+
+#### `cardinal_to_waypoint` — 16-point compass direction to a waypoint
+
+Returns the nearest 16-point compass label (`N`, `NNE`, `NE`, `ENE`, `E`, `ESE`,
+`SE`, `SSE`, `S`, `SSW`, `SW`, `WSW`, `W`, `WNW`, `NW`, `NNW`) for the direction
+from the triggering node to the target waypoint. Returns `[unknown]` if the node
+has no known location.
+
+```yaml
+- label: cardinal_to_cache
+  scope: node
+  tracks: cardinal_to_waypoint
+  target: hidden_cache       # waypoint label
+```
+
+Combine with `bearing_to_waypoint` for a human-friendly display:
+```yaml
+messages:
+  - label: direction_msg
+    text: "Cache is {bearing_to_cache} ({cardinal_to_cache}) from your position."
+```
+
 #### `seconds_since_last_update` — seconds since node's last position fix
 
 Returns the number of whole seconds elapsed since the triggering node last sent
