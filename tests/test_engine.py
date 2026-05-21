@@ -528,6 +528,118 @@ def test_random_n_limits_targets(db):
 
 
 # ---------------------------------------------------------------------------
+# prev_distance_to_waypoint / distance_change_to_waypoint
+# ---------------------------------------------------------------------------
+
+def test_prev_distance_to_waypoint_variable(db):
+    from config import Variable, Message
+    cfg = minimal_config(
+        messages=[
+            Message(label="hello", text="Hello world"),
+            Message(label="greet_node", text="Hi {node_id}"),
+            Message(label="greet_zone", text="Zone: {zone}"),
+            Message(label="dist_msg", text="prev:{prev_dist}"),
+        ],
+        variables=[
+            Variable(label="active_count", scope="global", tracks="flag_count", target="active"),
+            Variable(label="prev_dist", scope="node", tracks="prev_distance_to_waypoint", target="wp_a"),
+        ],
+        events=[
+            Event(
+                label="zone_ev",
+                trigger=ProximityTrigger(kind="enters_zone", target_label="zone_a"),
+                responses=[SendMessageResponse(message_label="dist_msg", target=TargetTriggeringNode())],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db)
+    # First position — no prev yet
+    eng.handle_position(NODE_ID, *OUTSIDE_ZONE)
+    # Second position (enters zone) — prev is OUTSIDE_ZONE
+    eng.handle_position(NODE_ID, *INSIDE_ZONE)
+
+    assert len(eng.sent_dms) == 1
+    text = eng.sent_dms[0][1]
+    # Should contain a numeric distance, not [unknown]
+    assert "[unknown]" not in text
+    assert "prev:" in text
+
+
+def test_distance_change_to_waypoint_negative_when_closer(db):
+    from config import Variable
+    cfg = minimal_config(
+        variables=[
+            Variable(label="active_count", scope="global", tracks="flag_count", target="active"),
+            Variable(label="delta", scope="node", tracks="distance_change_to_waypoint", target="wp_a"),
+        ],
+        events=[
+            Event(
+                label="getting_closer",
+                trigger=VariableThresholdTrigger(variable_label="delta", operator="lt", value=0),
+                responses=[AddFlagResponse(flag_label="active", target=TargetTriggeringNode())],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db)
+    # wp_a is at (47.005, -122.005)
+    # Start far away, then move closer
+    eng.handle_position(NODE_ID, 47.020, -122.020)  # ~2.1 km from wp_a
+    eng.handle_position(NODE_ID, *INSIDE_ZONE)       # ~0.4 km from wp_a — moved closer
+
+    assert db.has_flag("node", NODE_ID, "active")
+
+
+def test_distance_change_to_waypoint_positive_when_farther(db):
+    from config import Variable
+    cfg = minimal_config(
+        variables=[
+            Variable(label="active_count", scope="global", tracks="flag_count", target="active"),
+            Variable(label="delta", scope="node", tracks="distance_change_to_waypoint", target="wp_a"),
+        ],
+        events=[
+            Event(
+                label="getting_farther",
+                trigger=VariableThresholdTrigger(variable_label="delta", operator="gt", value=0),
+                responses=[AddFlagResponse(flag_label="active", target=TargetTriggeringNode())],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db)
+    # Start close, then move farther
+    eng.handle_position(NODE_ID, *INSIDE_ZONE)       # ~0.4 km from wp_a
+    eng.handle_position(NODE_ID, 47.020, -122.020)   # ~2.1 km from wp_a — moved farther
+
+    assert db.has_flag("node", NODE_ID, "active")
+
+
+def test_distance_change_unknown_without_prev(db):
+    from config import Variable, Message
+    cfg = minimal_config(
+        messages=[
+            Message(label="hello", text="Hello world"),
+            Message(label="greet_node", text="Hi {node_id}"),
+            Message(label="greet_zone", text="Zone: {zone}"),
+            Message(label="delta_msg", text="delta:{delta}"),
+        ],
+        variables=[
+            Variable(label="active_count", scope="global", tracks="flag_count", target="active"),
+            Variable(label="delta", scope="node", tracks="distance_change_to_waypoint", target="wp_a"),
+        ],
+        events=[
+            Event(
+                label="zone_ev",
+                trigger=ProximityTrigger(kind="enters_zone", target_label="zone_a"),
+                responses=[SendMessageResponse(message_label="delta_msg", target=TargetTriggeringNode())],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db)
+    # First position ever — no prev, should resolve to [unknown]
+    eng.handle_position(NODE_ID, *INSIDE_ZONE)
+    assert eng.sent_dms[0][1] == "delta:[unknown]"
+
+
+# ---------------------------------------------------------------------------
 # disable_event / enable_event responses
 # ---------------------------------------------------------------------------
 

@@ -16,6 +16,13 @@ CREATE TABLE IF NOT EXISTS node_locations (
     updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS prev_node_locations (
+    node_id   TEXT PRIMARY KEY,
+    lat       REAL NOT NULL,
+    lon       REAL NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS node_flags (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     node_id    TEXT NOT NULL,
@@ -163,6 +170,16 @@ class GameState:
 
     def update_node_location(self, node_id: str, lat: float, lon: float) -> None:
         with self._lock:
+            # Copy current position to prev before overwriting
+            self._conn.execute(
+                """
+                INSERT INTO prev_node_locations(node_id, lat, lon, updated_at)
+                SELECT node_id, lat, lon, updated_at FROM node_locations WHERE node_id=?
+                ON CONFLICT(node_id) DO UPDATE SET
+                    lat=excluded.lat, lon=excluded.lon, updated_at=excluded.updated_at
+                """,
+                (node_id,),
+            )
             self._conn.execute(
                 """
                 INSERT INTO node_locations(node_id, lat, lon, updated_at)
@@ -173,6 +190,20 @@ class GameState:
                 (node_id, lat, lon, _now_iso()),
             )
             self._conn.commit()
+
+    def get_node_location_updated_at(self, node_id: str) -> str | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT updated_at FROM node_locations WHERE node_id=?", (node_id,)
+            ).fetchone()
+            return row["updated_at"] if row else None
+
+    def get_prev_node_location(self, node_id: str) -> tuple[float, float] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT lat, lon FROM prev_node_locations WHERE node_id=?", (node_id,)
+            ).fetchone()
+            return (row["lat"], row["lon"]) if row else None
 
     def get_node_location(self, node_id: str) -> tuple[float, float] | None:
         with self._lock:

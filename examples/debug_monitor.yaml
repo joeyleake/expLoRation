@@ -1,0 +1,213 @@
+# expLoRation — Debug Node Monitor
+#
+# Auto-reports distance to both waypoints on every in-zone position update.
+# Responds to !update (GPS fix request) and !status (manual report, works
+# anywhere) from the defined node.
+#
+# CONFIGURE items are marked below.
+
+# ===========================================================================
+# ZONE
+# CONFIGURE: replace with real coordinates.
+# ===========================================================================
+
+zones:
+  - label: debug_zone
+    points:
+      - [5, -170]    # Southwest anchor (past Alaska/Hawaii)
+      - [5, -50]     # Southeast anchor (past Newfoundland)
+      - [85, -100]   # North pole anchor (above Canada)
+
+# ===========================================================================
+# WAYPOINTS
+# ===========================================================================
+
+waypoints:
+  - label: statue_of_liberty
+    lat: 40.689338858547494
+    lon: -74.04450040258666
+
+  - label: eiffel_tower
+    lat: 48.85846889352749
+    lon: 2.2944491111904495
+
+# ===========================================================================
+# NODES
+# ===========================================================================
+
+nodes:
+  - label: debug_node
+    node_id: "!0123456a"        # CONFIGURE
+    initial_flags:
+      - is_debug_node
+
+# ===========================================================================
+# FLAGS
+# ===========================================================================
+
+flags:
+  - label: is_debug_node        # gates all events to the defined node only
+  - label: in_debug_zone        # set on entry, cleared on exit
+
+# ===========================================================================
+# VARIABLES
+# ===========================================================================
+
+variables:
+  - label: dist_to_inside
+    scope: node
+    tracks: distance_to_waypoint
+    target: statue_of_liberty
+
+  - label: dist_to_outside
+    scope: node
+    tracks: distance_to_waypoint
+    target: eiffel_tower
+
+  - label: seconds_ago
+    scope: node
+    tracks: seconds_since_last_update
+
+  - label: cur_pos
+    scope: node
+    tracks: current_position
+
+  - label: prev_pos
+    scope: node
+    tracks: prev_position
+
+# ===========================================================================
+# MESSAGES
+# ===========================================================================
+
+messages:
+  - label: cmd_update
+    text: "!update"
+
+  - label: cmd_status
+    text: "!status"
+
+  - label: location_request_sent
+    text: "📡 Requesting location..."
+
+  - label: report_in_zone
+    text: |
+      Zone:     IN ✅
+      🗽:  {dist_to_inside}m
+      🗼: {dist_to_outside}m
+      Updated:  {seconds_ago}s ago
+      Curr pos: {cur_pos}
+      Prev pos: {prev_pos}
+
+  - label: report_out_of_zone
+    text: |
+      Zone:     OUT ❌
+      🗽:  {dist_to_inside}m
+      🗼: {dist_to_outside}m
+      Updated:  {seconds_ago}s ago
+      Curr pos: {cur_pos}
+      Prev pos: {prev_pos}
+
+# ===========================================================================
+# EVENTS
+# ===========================================================================
+
+events:
+
+  # ---------------------------------------------------------------------------
+  # ZONE TRACKING — maintain in_debug_zone flag on entry/exit
+  # ---------------------------------------------------------------------------
+
+  - label: enter_debug_zone
+    trigger:
+      type: enters_zone
+      target: debug_zone
+    trigger_per_node: true
+    exceptions:
+      - kind: node_lacks_flag
+        flag: is_debug_node
+    responses:
+      - type: add_flag
+        flag_label: in_debug_zone
+        to_triggering_node: true
+
+  - label: leave_debug_zone
+    trigger:
+      type: leaves_zone
+      target: debug_zone
+    trigger_per_node: true
+    exceptions:
+      - kind: node_lacks_flag
+        flag: is_debug_node
+    responses:
+      - type: remove_flag
+        flag_label: in_debug_zone
+        to_triggering_node: true
+
+  # ---------------------------------------------------------------------------
+  # AUTO REPORT — fires on every position update while inside zone
+  # in_zone fires per received position packet, not on a periodic tick.
+  # ---------------------------------------------------------------------------
+
+  - label: auto_report_in_zone
+    trigger:
+      type: in_zone
+      target: debug_zone
+    trigger_per_node: true
+    exceptions:
+      - kind: node_lacks_flag
+        flag: is_debug_node
+    responses:
+      - type: send_message
+        message_label: report_in_zone
+        to_triggering_node: true
+
+  # ---------------------------------------------------------------------------
+  # !update — request a GPS fix; works anywhere (no zone_label restriction)
+  # ---------------------------------------------------------------------------
+
+  - label: handle_cmd_update
+    trigger:
+      type: dm
+      message_label: cmd_update
+    exceptions:
+      - kind: node_lacks_flag
+        flag: is_debug_node
+    responses:
+      - type: request_location
+        to_triggering_node: true
+      - type: send_message
+        message_label: location_request_sent
+        to_triggering_node: true
+
+  # ---------------------------------------------------------------------------
+  # !status — manual report; two variants based on current zone membership
+  # ---------------------------------------------------------------------------
+
+  - label: handle_cmd_status_in_zone
+    trigger:
+      type: dm
+      message_label: cmd_status
+    exceptions:
+      - kind: node_lacks_flag
+        flag: is_debug_node
+      - kind: node_lacks_flag
+        flag: in_debug_zone
+    responses:
+      - type: send_message
+        message_label: report_in_zone
+        to_triggering_node: true
+
+  - label: handle_cmd_status_out_of_zone
+    trigger:
+      type: dm
+      message_label: cmd_status
+    exceptions:
+      - kind: node_lacks_flag
+        flag: is_debug_node
+      - kind: node_has_flag
+        flag: in_debug_zone
+    responses:
+      - type: send_message
+        message_label: report_out_of_zone
+        to_triggering_node: true

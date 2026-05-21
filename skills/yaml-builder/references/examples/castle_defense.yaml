@@ -1,0 +1,304 @@
+# expLoRation — Castle Defense
+#
+# A medieval siege simulation set at Bodiam Castle, East Sussex, England
+# (built 1385, one of England's finest surviving medieval castles).
+#
+# Defenders carry nodes flagged as "defender". Any unrecognized node
+# entering the outer grounds, crossing the moat approach, or breaching
+# the gatehouse triggers escalating alarm responses on the war_council
+# channel. A dawn status report is broadcast every morning.
+#
+# Zones are laid out in concentric rings mirroring the castle's real
+# defensive geography: outer grounds → moat perimeter → gatehouse approach.
+#
+# Real coordinates: Bodiam Castle, East Sussex, UK (51.0025°N, 0.5435°E)
+
+channels:
+  - label: war_council
+    name: WarCouncil
+    psk: AQ==
+    monitor: true
+    participate: true
+
+# ---------------------------------------------------------------------------
+# Zones — three defensive rings around the castle
+# ---------------------------------------------------------------------------
+zones:
+  # Outer grounds — the wide perimeter, first line of observation
+  - label: outer_grounds_a
+    points:
+      - [51.0045, 0.5405]   # northwest
+      - [51.0005, 0.5405]   # southwest
+      - [51.0005, 0.5445]   # southeast
+
+  - label: outer_grounds_b
+    points:
+      - [51.0045, 0.5405]   # northwest
+      - [51.0045, 0.5465]   # northeast
+      - [51.0005, 0.5445]   # southeast
+
+  # Moat perimeter — the ring immediately surrounding the water
+  - label: moat_perimeter_a
+    points:
+      - [51.0035, 0.5420]   # northwest
+      - [51.0015, 0.5420]   # southwest
+      - [51.0015, 0.5450]   # southeast
+
+  - label: moat_perimeter_b
+    points:
+      - [51.0035, 0.5420]   # northwest
+      - [51.0035, 0.5450]   # northeast
+      - [51.0015, 0.5450]   # southeast
+
+  # Gatehouse approach — the kill zone directly before the main entrance
+  - label: gatehouse_approach
+    points:
+      - [51.0030, 0.5430]   # left flank
+      - [51.0020, 0.5430]   # right flank
+      - [51.0025, 0.5440]   # forward point
+
+# ---------------------------------------------------------------------------
+# Waypoints
+# ---------------------------------------------------------------------------
+waypoints:
+  - label: gatehouse
+    lat: 51.00250
+    lon: 0.54350
+
+  - label: keep
+    lat: 51.00255
+    lon: 0.54360
+
+# ---------------------------------------------------------------------------
+# Nodes — known defenders
+# ---------------------------------------------------------------------------
+nodes:
+  - label: lord_commander
+    node_id: "!deadbeef"
+    initial_flags:
+      - defender
+      - commander
+
+  - label: gate_watch
+    node_id: "!cafebabe"
+    initial_flags:
+      - defender
+
+  - label: tower_watch
+    node_id: "!d00dfeed"
+    initial_flags:
+      - defender
+
+# ---------------------------------------------------------------------------
+# Flags
+# ---------------------------------------------------------------------------
+flags:
+  - label: defender
+  - label: commander
+  - label: scout_detected     # outer grounds incursion
+  - label: breach_imminent    # moat perimeter reached
+  - label: gate_under_attack  # gatehouse approach reached
+
+# ---------------------------------------------------------------------------
+# Variables
+# ---------------------------------------------------------------------------
+variables:
+  - label: outer_count_a
+    scope: zone
+    tracks: node_count
+    target: outer_grounds_a
+
+  - label: outer_count_b
+    scope: zone
+    tracks: node_count
+    target: outer_grounds_b
+
+  - label: moat_count_a
+    scope: zone
+    tracks: node_count
+    target: moat_perimeter_a
+
+  - label: moat_count_b
+    scope: zone
+    tracks: node_count
+    target: moat_perimeter_b
+
+  - label: gate_count
+    scope: zone
+    tracks: node_count
+    target: gatehouse_approach
+
+  - label: nearest_threat_name
+    scope: waypoint
+    tracks: nearest_node_name
+    target: gatehouse
+    exclude_flag: defender
+
+  - label: nearest_threat_dist
+    scope: waypoint
+    tracks: nearest_node_distance
+    target: gatehouse
+    exclude_flag: defender
+
+# ---------------------------------------------------------------------------
+# Messages
+# ---------------------------------------------------------------------------
+messages:
+  - label: dawn_report
+    text: |
+      ⚔️  DAWN REPORT — Bodiam Castle
+      Outer grounds: {outer_count_a} node(s) west | {outer_count_b} node(s) east
+      Moat perimeter: {moat_count_a} node(s) west | {moat_count_b} node(s) east
+      Gatehouse approach: {gate_count} node(s)
+      Nearest unknown contact: {nearest_threat_name} at {nearest_threat_dist}m
+
+  - label: scouts_spotted
+    text: "👁️  SCOUTS SPOTTED in the outer grounds. Enemy forces approaching — all defenders to stations."
+
+  - label: moat_breach
+    text: "🔔 ALARM — Enemy has reached the MOAT PERIMETER. Raise the drawbridge. Archers to the walls."
+
+  - label: gate_assault
+    text: "🚨 GATES UNDER ASSAULT — Enemy in the gatehouse approach! Close the portcullis! ALL HANDS!"
+
+  - label: enemy_retreating
+    text: "✅ Threat cleared from gatehouse approach. Remain vigilant."
+
+# ---------------------------------------------------------------------------
+# Events
+# ---------------------------------------------------------------------------
+events:
+  # Daily dawn status report
+  - label: dawn_status_report
+    trigger:
+      type: time_window
+      start: "2020-01-01T00:00:00"
+      end:   "2099-01-01T00:00:00"
+    auto_recur: true
+    recur_mins: 1440   # 24 hours
+    responses:
+      - type: send_message
+        message_label: dawn_report
+        to_channel: war_council
+
+  # Outer grounds — enemy scouts detected
+  - label: outer_grounds_incursion
+    trigger:
+      type: enters_zone
+      target: outer_grounds_a
+    trigger_per_node: true
+    responses:
+      - type: add_flag
+        flag_label: scout_detected
+        to_triggering_node: true
+      - type: send_message
+        message_label: scouts_spotted
+        to_channel: war_council
+      - type: send_message
+        message_label: scouts_spotted
+        to_node: lord_commander
+    exceptions:
+      - kind: node_has_flag
+        flag: defender
+    reset_mins: 15
+
+  - label: outer_grounds_incursion_b
+    trigger:
+      type: enters_zone
+      target: outer_grounds_b
+    trigger_per_node: true
+    responses:
+      - type: add_flag
+        flag_label: scout_detected
+        to_triggering_node: true
+      - type: send_message
+        message_label: scouts_spotted
+        to_channel: war_council
+      - type: send_message
+        message_label: scouts_spotted
+        to_node: lord_commander
+    exceptions:
+      - kind: node_has_flag
+        flag: defender
+    reset_mins: 15
+
+  # Moat perimeter — serious incursion
+  - label: moat_perimeter_breach_a
+    trigger:
+      type: enters_zone
+      target: moat_perimeter_a
+    trigger_per_node: true
+    responses:
+      - type: add_flag
+        flag_label: breach_imminent
+        to_triggering_node: true
+      - type: send_message
+        message_label: moat_breach
+        to_channel: war_council
+      - type: send_message
+        message_label: moat_breach
+        to_node: lord_commander
+    exceptions:
+      - kind: node_has_flag
+        flag: defender
+    reset_mins: 10
+
+  - label: moat_perimeter_breach_b
+    trigger:
+      type: enters_zone
+      target: moat_perimeter_b
+    trigger_per_node: true
+    responses:
+      - type: add_flag
+        flag_label: breach_imminent
+        to_triggering_node: true
+      - type: send_message
+        message_label: moat_breach
+        to_channel: war_council
+      - type: send_message
+        message_label: moat_breach
+        to_node: lord_commander
+    exceptions:
+      - kind: node_has_flag
+        flag: defender
+    reset_mins: 10
+
+  # Gatehouse approach — critical alert
+  - label: gate_assault_alert
+    trigger:
+      type: enters_zone
+      target: gatehouse_approach
+    trigger_per_node: true
+    responses:
+      - type: add_flag
+        flag_label: gate_under_attack
+        to_triggering_node: true
+      - type: send_message
+        message_label: gate_assault
+        to_channel: war_council
+      - type: send_message
+        message_label: gate_assault
+        to_node: lord_commander
+      - type: request_location
+        to_node: lord_commander
+    exceptions:
+      - kind: node_has_flag
+        flag: defender
+    reset_mins: 5
+
+  # All clear when enemy leaves gatehouse approach
+  - label: gate_all_clear
+    trigger:
+      type: leaves_zone
+      target: gatehouse_approach
+    trigger_per_node: true
+    responses:
+      - type: remove_flag
+        flag_label: gate_under_attack
+        to_triggering_node: true
+      - type: send_message
+        message_label: enemy_retreating
+        to_channel: war_council
+    exceptions:
+      - kind: node_has_flag
+        flag: defender     # defenders leaving the zone should not send an all-clear

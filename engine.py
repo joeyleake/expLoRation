@@ -179,7 +179,12 @@ class Engine:
         for event in self.config.events:
             if isinstance(event.trigger, VariableThresholdTrigger):
                 var_def = self._mutable_var_defs.get(event.trigger.variable_label)
-                if var_def and var_def.scope == "node":
+                computed_var = None if var_def else self._get_variable(event.trigger.variable_label)
+                is_node_scoped = (
+                    (var_def is not None and var_def.scope == "node") or
+                    (computed_var is not None and computed_var.scope == "node")
+                )
+                if is_node_scoped:
                     if self._should_fire(event, ctx):
                         self._fire_event(event, ctx)
 
@@ -391,6 +396,9 @@ class Engine:
                         raw = float(raw_str)
                     except ValueError:
                         raw = raw_str
+                # Non-numeric result (e.g. "[unknown]") can't satisfy numeric operators
+                if isinstance(raw, str) and t.operator not in ("eq", "neq"):
+                    return False
                 return self._evaluate_threshold(raw, t.operator, t.value)
             if var_def.scope == "node":
                 if not isinstance(ctx, (NodeContext, MessageContext)):
@@ -901,7 +909,13 @@ class Engine:
             log.warning("Invalid node_id for location request: %r", node_id)
             return
         def _fn(d=dest):
-            self.interface.sendText("", destinationId=d, wantResponse=True)
+            from meshtastic import portnums_pb2
+            self.interface.sendData(
+                data=b"",
+                destinationId=d,
+                portNum=portnums_pb2.PortNum.POSITION_APP,
+                wantResponse=True,
+            )
             log.info("Location request → %s", node_id)
         self._send_queue.put(_fn)
 
@@ -963,6 +977,53 @@ class Engine:
             if node_loc is None or wp is None:
                 return "[unknown]"
             return str(round(geo.haversine(*node_loc, wp.lat, wp.lon)))
+
+        if var.tracks == "seconds_since_last_update":
+            if triggering_node_id is None:
+                return "[no node context]"
+            updated_at = self.state.get_node_location_updated_at(triggering_node_id)
+            if updated_at is None:
+                return "[unknown]"
+            from datetime import datetime, timezone
+            elapsed = datetime.now(timezone.utc) - datetime.fromisoformat(updated_at)
+            return str(int(elapsed.total_seconds()))
+
+        if var.tracks == "current_position":
+            if triggering_node_id is None:
+                return "[no node context]"
+            loc = located.get(triggering_node_id)
+            if loc is None:
+                return "[unknown]"
+            return f"{loc[0]:.5f}, {loc[1]:.5f}"
+
+        if var.tracks == "prev_position":
+            if triggering_node_id is None:
+                return "[no node context]"
+            loc = self.state.get_prev_node_location(triggering_node_id)
+            if loc is None:
+                return "[unknown]"
+            return f"{loc[0]:.5f}, {loc[1]:.5f}"
+
+        if var.tracks == "prev_distance_to_waypoint":
+            if triggering_node_id is None:
+                return "[no node context]"
+            prev_loc = self.state.get_prev_node_location(triggering_node_id)
+            wp = self._get_waypoint(var.target)
+            if prev_loc is None or wp is None:
+                return "[unknown]"
+            return str(round(geo.haversine(*prev_loc, wp.lat, wp.lon)))
+
+        if var.tracks == "distance_change_to_waypoint":
+            if triggering_node_id is None:
+                return "[no node context]"
+            curr_loc = located.get(triggering_node_id)
+            prev_loc = self.state.get_prev_node_location(triggering_node_id)
+            wp = self._get_waypoint(var.target)
+            if curr_loc is None or prev_loc is None or wp is None:
+                return "[unknown]"
+            curr_dist = geo.haversine(*curr_loc, wp.lat, wp.lon)
+            prev_dist = geo.haversine(*prev_loc, wp.lat, wp.lon)
+            return str(round(curr_dist - prev_dist, 1))
 
         if var.tracks == "distance_to_zone":
             if triggering_node_id is None:
