@@ -2,7 +2,7 @@
 #
 # A single search zone with one hidden cache waypoint. Nodes are welcomed
 # on zone entry with a clue and can DM !hint for warmer/colder feedback
-# based on their last two known positions. After 10 hints the distance in
+# based on their last two known positions. After 5 hints the distance in
 # meters is included. A second clue fires automatically within 10 m. The
 # player wins by DMing the cache password, which announces their success
 # to the Geocaching channel.
@@ -13,8 +13,8 @@
 # limiting rather than reset_mins, ensuring a single cooldown applies
 # across all warmer/colder branches.
 #
-# Note: hint_veteran (granted at 10 uses) is awarded on the next position
-# update after hint_count reaches 10, not the instant the 10th hint fires.
+# Note: hint_veteran (granted at 5 uses) is awarded on the next position
+# update after hint_count reaches 5, not the instant the 5th hint fires.
 # In practice this means at most one extra basic hint before the upgrade.
 #
 # CONFIGURE: replace all coordinates before deployment.
@@ -50,7 +50,7 @@ waypoints:
 flags:
   - label: visited_zone    # permanent; distinguishes first entry from re-entry
   - label: found_cache     # permanent; prevents duplicate win announcements
-  - label: hint_veteran    # permanent; granted at 10 hints — unlocks distance readout
+  - label: hint_veteran    # permanent; granted at 5 hints — unlocks distance readout
   - label: hint_cooldown
     expiry_mins: 1         # shared rate limit across all hint variants
   - label: dir_closer      # set on position update when node moved toward cache
@@ -65,7 +65,7 @@ messages:
   - label: status_cmd
     text: "!status"
   - label: password_cmd
-    text: "AQ=="
+    text: "abracadabra"
 
   - label: welcome_msg
     text: |
@@ -383,7 +383,7 @@ events:
       type: variable_threshold
       variable: hint_count
       operator: gte
-      value: 10
+      value: 5
     trigger_per_node: true
     max_triggers: 1
     responses:
@@ -426,6 +426,19 @@ events:
       - type: send_message
         message_label: found_announcement
         to_channel: geocaching
+
+  # --- Stale location refresh ---
+
+  - label: refresh_stale_location
+    trigger:
+      type: in_zone
+      target: search_zone
+    trigger_per_node: true
+    auto_recur: true
+    recur_mins: 10
+    responses:
+      - type: request_location
+        to_triggering_node: true
 
   # --- Status ---
 
