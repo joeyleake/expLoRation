@@ -64,6 +64,8 @@ Generate a complete, runnable YAML file. Follow these rules:
 - Use placeholder coordinates (SF area: 37.77°N, 122.41°W) if the user hasn't
   provided real ones — add a comment saying `# CONFIGURE: replace with real coordinates`
 - Use `AQ==` as the default PSK unless the user specifies otherwise
+- Never use real coordinates or real node IDs in generated output — use the SF
+  placeholder area and generic node IDs like `!aabbccdd`, `!11223344`
 
 **Labels**
 - Labels must be unique within their type
@@ -88,8 +90,127 @@ Generate a complete, runnable YAML file. Follow these rules:
 - For game announcements, use emoji sparingly for visual scanning
 - Multi-line messages use YAML `|` block scalar
 - Messages longer than ~180 chars will be split by the engine — design accordingly
+- Use `{node_id}` to name the triggering node in announcements
+- Use `{zone}` to name the zone in messages where it adds context
 
 **Common patterns to apply correctly:**
+
+*Warmer/colder direction tracking:*
+
+`distance_change_to_waypoint` returns negative when the node moved closer and
+positive when it moved farther. Since exception logic only supports flag checks,
+direction is tracked by setting flags on position update and routing hint
+commands via those flags.
+
+```yaml
+variables:
+  - label: hint_delta
+    scope: node
+    tracks: distance_change_to_waypoint
+    target: hidden_cache
+
+flags:
+  - label: dir_closer
+  - label: dir_farther
+
+events:
+  - label: mark_dir_closer
+    trigger:
+      type: variable_threshold
+      variable: hint_delta
+      operator: lt
+      value: -1            # moved more than 1m closer
+    trigger_per_node: true
+    responses:
+      - type: add_flag
+        flag_label: dir_closer
+        to_triggering_node: true
+      - type: remove_flag
+        flag_label: dir_farther
+        to_triggering_node: true
+
+  - label: hint_warmer
+    trigger:
+      type: dm
+      message_label: hint_cmd
+    trigger_per_node: true
+    exceptions:
+      - kind: node_lacks_flag
+        flag: dir_closer    # skip if node has NOT moved closer
+    responses:
+      - type: send_message
+        message_label: hint_warmer_msg
+        to_triggering_node: true
+```
+
+The `hint_same` variant fires when NEITHER flag is present (both `node_has_flag`
+exceptions skip it). The `hint_colder` variant fires when `dir_farther` is set
+AND `dir_closer` is NOT set (add a `node_has_flag: dir_closer` exception).
+
+*Stale location refresh:*
+
+`seconds_since_last_update` returns seconds since the node's last GPS packet.
+Use with `variable_threshold` to silently request fresh positions when a node
+DMs the bot but hasn't updated recently. The trigger evaluates at DM receipt
+time — no changes to the DM event are needed.
+
+```yaml
+variables:
+  - label: seconds_since_update
+    scope: node
+    tracks: seconds_since_last_update
+
+events:
+  - label: refresh_stale_location
+    trigger:
+      type: variable_threshold
+      variable: seconds_since_update
+      operator: gte
+      value: 300           # 5 minutes
+    trigger_per_node: true
+    reset_mins: 5          # at most once per node per 5 minutes
+    responses:
+      - type: request_location
+        to_triggering_node: true
+```
+
+*Mutable variable counter with upgrade gate:*
+
+```yaml
+mutable_variables:
+  - label: hint_count
+    type: integer
+    scope: node
+    initial: 0
+
+flags:
+  - label: hint_veteran    # permanent — unlocks enhanced hints after 10 uses
+
+events:
+  - label: count_hint
+    trigger:
+      type: dm
+      message_label: hint_cmd
+    trigger_per_node: true
+    responses:
+      - type: increment_variable
+        variable_label: hint_count
+        amount: 1
+        to_triggering_node: true
+
+  - label: grant_hint_veteran
+    trigger:
+      type: variable_threshold
+      variable: hint_count
+      operator: gte
+      value: 10
+    trigger_per_node: true
+    max_triggers: 1
+    responses:
+      - type: add_flag
+        flag_label: hint_veteran
+        to_triggering_node: true
+```
 
 *Timed selection of a random node (e.g. orbital cannon targeting):*
 ```yaml
@@ -195,13 +316,47 @@ exceptions:
           to_channel: main
 ```
 
+*Group-based routing:*
+```yaml
+groups:
+  - label: red_team
+    kind: node
+
+events:
+  - label: join_red_team
+    trigger:
+      type: dm
+      message_label: join_red_cmd
+    trigger_per_node: true
+    responses:
+      - type: add_to_group
+        group_label: red_team
+        to_triggering_node: true
+
+  - label: red_team_alert
+    trigger:
+      type: enters_zone
+      target: red_base
+    trigger_per_node: true
+    exceptions:
+      - kind: node_not_in_group
+        group: red_team
+    responses:
+      - type: send_message
+        message_label: intruder_alert
+        to_group: red_team
+```
+
 **Variable interpolation in messages:**
 ```yaml
 messages:
   - label: status
     text: "Active: {survivor_count} | Destroyed: {destroyed_count}"
+  - label: found
+    text: "🎉 {node_id} found the cache!"
 ```
 Use `{label}` to interpolate any defined variable (computed or mutable).
+`{node_id}` and `{zone}` are always available as built-in tokens.
 Node-scoped variables resolve to the triggering node's value.
 
 **Game state anchor:**
@@ -249,29 +404,42 @@ Before outputting any YAML, mentally verify:
 - [ ] Every label referenced in a trigger, response, or exception is defined in its section
 - [ ] Every `near_waypoint`, `near_zone`, `near_node` trigger has `meters`
 - [ ] Every `channel` trigger has `channel_label`
-- [ ] Every `zone_has_flag`/`waypoint_has_flag` exception has `target`
+- [ ] Every `zone_has_flag`/`waypoint_has_flag` exception has `target` (or is in a dynamic waypoint context)
+- [ ] Every `*_in_group`/`*_not_in_group` exception has `group`; zone/waypoint group exceptions also have `target`
 - [ ] `create_waypoint` only appears inside `with_node` or in events with node context
   (`enters_zone`, `leaves_zone`, `near_waypoint`, `near_node`, `dm`, `channel`, `flag_expired` with `target_kind: node`)
 - [ ] `add_waypoint_flag`, `remove_waypoint_flag`, `destroy_waypoint` only appear
   in `near_waypoint` + `target_flag` or `flag_expired` + `dynamic_waypoint` events
 - [ ] `to_triggering_node` is not used in `time_window`, `in_zone_on_start`,
   `waypoint_expired`, or `flag_expired` with non-node `target_kind`
+- [ ] `to_all_near_triggering_waypoint` only used in dynamic waypoint context
 - [ ] `random_options` has at least 2 options
 - [ ] All `initial_flags` on `nodes:` entries are defined in `flags:`
+- [ ] All `initial_members` on `groups:` entries are defined and match the group's `kind`
 - [ ] `mutable_variables` used in `increment_variable` are type `integer` or `float`
+- [ ] `set_variable`/`increment_variable` on `scope: node` variables have a target; `scope: global` have no target
 - [ ] `variable_threshold` `operator` is one of: `lt`, `lte`, `eq`, `neq`, `gte`, `gt`
+- [ ] `flag_expired` has `target_kind`; `waypoint_expired` does not require it
+- [ ] No real-world coordinates, node IDs, or personally-identifying information
 
 ## Reference examples
 
-Four complete example configs are in `references/examples/`. Read them for
+Five complete example configs are in `references/examples/`. Read them for
 patterns and idioms before generating complex configs:
 
-- `security_system.yaml` — simple zone monitoring, flags, channel broadcasts
-- `ghost_walk.yaml` — self-guided tour, sequential flag gating, no staff required
-- `castle_defense.yaml` — multi-zone escalating alerts, leave/enter events, status reports
+- `ghost_walk.yaml` — self-guided tour, sequential flag gating, `flag_count` variable,
+  staff exclusion via initial flags
+- `castle_defense.yaml` — multi-zone escalating alerts, `leaves_zone` / `enters_zone`,
+  `auto_recur` status reports, `to_node` DMs, `request_location`
+- `trail_race.yaml` — dual-channel (one broadcast-only), `{node_id}` in public
+  announcements, `near_waypoint` checkpoint timing, staff exclusion
+- `warmer_colder_geocache.yaml` — **primary reference for:** `distance_change_to_waypoint`,
+  direction-flag routing, `mutable_variables` + `increment_variable`, `variable_threshold`
+  upgrade gate, `expiry_mins` rate limiter, stale location refresh
 - `orbital_cannon_survival.yaml` — full-featured: `with_node`, `create_waypoint`,
   `flag_expired`, dynamic waypoints, `random_skip`, `random_options`, mutable variables,
   `variable_threshold` win conditions, open enrollment
 
-Read the relevant example(s) before generating. The orbital cannon example is the
-most complete showcase of advanced features.
+Read the relevant example(s) before generating. For scenarios involving movement
+tracking, hint systems, or mutable counters, start with `warmer_colder_geocache.yaml`.
+For advanced dynamic waypoint mechanics, start with `orbital_cannon_survival.yaml`.

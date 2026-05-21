@@ -1,0 +1,452 @@
+# expLoRation — Warmer/Colder Geocache
+#
+# A single search zone with one hidden cache waypoint. Nodes are welcomed
+# on zone entry with a clue and can DM !hint for warmer/colder feedback
+# based on their last two known positions. After 5 hints the distance in
+# meters is included. A second clue fires automatically within 10 m. The
+# player wins by DMing the cache password, which announces their success
+# to the Geocaching channel.
+#
+# Warmer/colder routing uses two flags (dir_closer, dir_farther) set on
+# each position update via distance_change_to_waypoint. All six hint
+# variants check a shared hint_cooldown flag (expiry_mins: 1) for rate
+# limiting rather than reset_mins, ensuring a single cooldown applies
+# across all warmer/colder branches.
+#
+# Note: hint_veteran (granted at 5 uses) is awarded on the next position
+# update after hint_count reaches 5, not the instant the 5th hint fires.
+# In practice this means at most one extra basic hint before the upgrade.
+#
+# CONFIGURE: replace all coordinates before deployment.
+
+channels:
+  - label: geocaching
+    name: Geocaching
+    psk: AQ==
+    monitor: true
+    participate: true
+
+# ---------------------------------------------------------------------------
+# Zone — search area (single triangle; use two triangles for a rectangle)
+# ---------------------------------------------------------------------------
+zones:
+  - label: search_zone
+    points:
+      - [37.770, -122.410]   # CONFIGURE: SW corner
+      - [37.780, -122.410]   # CONFIGURE: NW corner
+      - [37.770, -122.400]   # CONFIGURE: SE corner
+
+# ---------------------------------------------------------------------------
+# Waypoints
+# ---------------------------------------------------------------------------
+waypoints:
+  - label: geocache
+    lat: 37.774    # CONFIGURE: exact cache location (keep secret — not broadcast)
+    lon: -122.406
+
+# ---------------------------------------------------------------------------
+# Flags
+# ---------------------------------------------------------------------------
+flags:
+  - label: visited_zone    # permanent; distinguishes first entry from re-entry
+  - label: found_cache     # permanent; prevents duplicate win announcements
+  - label: hint_veteran    # permanent; granted at 5 hints — unlocks distance readout
+  - label: hint_cooldown
+    expiry_mins: 1         # shared rate limit across all hint variants
+  - label: dir_closer      # set on position update when node moved toward cache
+  - label: dir_farther     # set on position update when node moved away from cache
+
+# ---------------------------------------------------------------------------
+# Messages
+# ---------------------------------------------------------------------------
+messages:
+  - label: hint_cmd
+    text: "!hint"
+  - label: status_cmd
+    text: "!status"
+  - label: password_cmd
+    text: "abracadabra"
+
+  - label: welcome_msg
+    text: |
+      🗺️ Welcome to the Fernwood Geocache Hunt!
+      Somewhere in this area a small container is hidden.
+      Clue: follow the sound of water — the cache rests where
+      roots meet stone, off the main path.
+      DM !hint after moving for warmer/colder guidance.
+
+  - label: reenter_msg
+    text: "Welcome back to the search area. The cache is still out there — use !hint for guidance."
+
+  - label: exit_msg
+    text: "⚠️ You've left the search zone. Head back to continue the hunt."
+
+  - label: hint_warmer_msg
+    text: "🔥 Warmer — you're heading in the right direction. Keep going."
+
+  - label: hint_colder_msg
+    text: "🧊 Colder — you're moving away from the cache. Turn around."
+
+  - label: hint_same_msg
+    text: "↔️ No significant movement detected. Try moving in a different direction and hint again."
+
+  - label: hint_warmer_dist_msg
+    text: "🔥 Warmer! Approximately {dist_to_cache}m to go."
+
+  - label: hint_colder_dist_msg
+    text: "🧊 Colder. You're about {dist_to_cache}m away — turn around."
+
+  - label: hint_same_dist_msg
+    text: "↔️ About the same. You're roughly {dist_to_cache}m from the cache. Try a new direction."
+
+  - label: near_cache_msg
+    text: |
+      🔥🔥 You're right on top of it! Second clue:
+      It's not on the ground. Look at chest height —
+      something that blends in is hiding in plain sight.
+
+  - label: found_announcement
+    text: "🎉 {node_id} has found the Fernwood Geocache! Well done!"
+
+  - label: status_msg
+    text: "📡 GeocacheBot online. The Fernwood cache is active and waiting to be found."
+
+# ---------------------------------------------------------------------------
+# Variables
+# ---------------------------------------------------------------------------
+mutable_variables:
+  - label: hint_count
+    type: integer
+    scope: node
+    initial: 0
+
+variables:
+  - label: dist_to_cache
+    scope: node
+    tracks: distance_to_waypoint
+    target: geocache
+
+  - label: hint_delta
+    scope: node
+    tracks: distance_change_to_waypoint
+    target: geocache
+
+# ---------------------------------------------------------------------------
+# Events
+# ---------------------------------------------------------------------------
+events:
+
+  # --- Zone entry / exit ---
+
+  - label: zone_first_welcome
+    trigger:
+      type: enters_zone
+      target: search_zone
+    trigger_per_node: true
+    exceptions:
+      - kind: node_has_flag
+        flag: visited_zone
+    responses:
+      - type: add_flag
+        flag_label: visited_zone
+        to_triggering_node: true
+      - type: send_message
+        message_label: welcome_msg
+        to_triggering_node: true
+
+  - label: zone_reenter
+    trigger:
+      type: enters_zone
+      target: search_zone
+    trigger_per_node: true
+    exceptions:
+      - kind: node_lacks_flag
+        flag: visited_zone
+    responses:
+      - type: send_message
+        message_label: reenter_msg
+        to_triggering_node: true
+
+  - label: zone_exit
+    trigger:
+      type: leaves_zone
+      target: search_zone
+    trigger_per_node: true
+    responses:
+      - type: send_message
+        message_label: exit_msg
+        to_triggering_node: true
+
+  # --- Direction tracking (fires on every position update) ---
+
+  - label: mark_dir_closer
+    trigger:
+      type: variable_threshold
+      variable: hint_delta
+      operator: lt
+      value: -1
+    trigger_per_node: true
+    responses:
+      - type: add_flag
+        flag_label: dir_closer
+        to_triggering_node: true
+      - type: remove_flag
+        flag_label: dir_farther
+        to_triggering_node: true
+
+  - label: mark_dir_farther
+    trigger:
+      type: variable_threshold
+      variable: hint_delta
+      operator: gt
+      value: 1
+    trigger_per_node: true
+    responses:
+      - type: add_flag
+        flag_label: dir_farther
+        to_triggering_node: true
+      - type: remove_flag
+        flag_label: dir_closer
+        to_triggering_node: true
+
+  # --- Hint responses: basic (fewer than 10 uses) ---
+  # Exception logic:
+  #   hint_warmer: fires when node HAS dir_closer (node_lacks_flag: dir_closer skips it if absent)
+  #   hint_colder: fires when node HAS dir_farther AND NOT dir_closer
+  #   hint_same:   fires when node has NEITHER flag (both has_flag exceptions skip it if present)
+  # All three: skip if hint_cooldown active; skip if hint_veteran (veteran events handle those)
+
+  - label: hint_warmer_basic
+    trigger:
+      type: dm
+      message_label: hint_cmd
+      zone_label: search_zone
+    trigger_per_node: true
+    exceptions:
+      - kind: node_has_flag
+        flag: hint_cooldown
+      - kind: node_has_flag
+        flag: hint_veteran
+      - kind: node_lacks_flag
+        flag: dir_closer
+    responses:
+      - type: send_message
+        message_label: hint_warmer_msg
+        to_triggering_node: true
+      - type: add_flag
+        flag_label: hint_cooldown
+        to_triggering_node: true
+      - type: increment_variable
+        variable_label: hint_count
+        amount: 1
+        to_triggering_node: true
+
+  - label: hint_colder_basic
+    trigger:
+      type: dm
+      message_label: hint_cmd
+      zone_label: search_zone
+    trigger_per_node: true
+    exceptions:
+      - kind: node_has_flag
+        flag: hint_cooldown
+      - kind: node_has_flag
+        flag: hint_veteran
+      - kind: node_has_flag
+        flag: dir_closer
+      - kind: node_lacks_flag
+        flag: dir_farther
+    responses:
+      - type: send_message
+        message_label: hint_colder_msg
+        to_triggering_node: true
+      - type: add_flag
+        flag_label: hint_cooldown
+        to_triggering_node: true
+      - type: increment_variable
+        variable_label: hint_count
+        amount: 1
+        to_triggering_node: true
+
+  - label: hint_same_basic
+    trigger:
+      type: dm
+      message_label: hint_cmd
+      zone_label: search_zone
+    trigger_per_node: true
+    exceptions:
+      - kind: node_has_flag
+        flag: hint_cooldown
+      - kind: node_has_flag
+        flag: hint_veteran
+      - kind: node_has_flag
+        flag: dir_closer
+      - kind: node_has_flag
+        flag: dir_farther
+    responses:
+      - type: send_message
+        message_label: hint_same_msg
+        to_triggering_node: true
+      - type: add_flag
+        flag_label: hint_cooldown
+        to_triggering_node: true
+      - type: increment_variable
+        variable_label: hint_count
+        amount: 1
+        to_triggering_node: true
+
+  # --- Hint responses: veteran (10+ uses, includes distance) ---
+
+  - label: hint_warmer_veteran
+    trigger:
+      type: dm
+      message_label: hint_cmd
+      zone_label: search_zone
+    trigger_per_node: true
+    exceptions:
+      - kind: node_has_flag
+        flag: hint_cooldown
+      - kind: node_lacks_flag
+        flag: hint_veteran
+      - kind: node_lacks_flag
+        flag: dir_closer
+    responses:
+      - type: send_message
+        message_label: hint_warmer_dist_msg
+        to_triggering_node: true
+      - type: add_flag
+        flag_label: hint_cooldown
+        to_triggering_node: true
+      - type: increment_variable
+        variable_label: hint_count
+        amount: 1
+        to_triggering_node: true
+
+  - label: hint_colder_veteran
+    trigger:
+      type: dm
+      message_label: hint_cmd
+      zone_label: search_zone
+    trigger_per_node: true
+    exceptions:
+      - kind: node_has_flag
+        flag: hint_cooldown
+      - kind: node_lacks_flag
+        flag: hint_veteran
+      - kind: node_has_flag
+        flag: dir_closer
+      - kind: node_lacks_flag
+        flag: dir_farther
+    responses:
+      - type: send_message
+        message_label: hint_colder_dist_msg
+        to_triggering_node: true
+      - type: add_flag
+        flag_label: hint_cooldown
+        to_triggering_node: true
+      - type: increment_variable
+        variable_label: hint_count
+        amount: 1
+        to_triggering_node: true
+
+  - label: hint_same_veteran
+    trigger:
+      type: dm
+      message_label: hint_cmd
+      zone_label: search_zone
+    trigger_per_node: true
+    exceptions:
+      - kind: node_has_flag
+        flag: hint_cooldown
+      - kind: node_lacks_flag
+        flag: hint_veteran
+      - kind: node_has_flag
+        flag: dir_closer
+      - kind: node_has_flag
+        flag: dir_farther
+    responses:
+      - type: send_message
+        message_label: hint_same_dist_msg
+        to_triggering_node: true
+      - type: add_flag
+        flag_label: hint_cooldown
+        to_triggering_node: true
+      - type: increment_variable
+        variable_label: hint_count
+        amount: 1
+        to_triggering_node: true
+
+  # --- Veteran upgrade ---
+
+  - label: grant_hint_veteran
+    trigger:
+      type: variable_threshold
+      variable: hint_count
+      operator: gte
+      value: 5
+    trigger_per_node: true
+    max_triggers: 1
+    responses:
+      - type: add_flag
+        flag_label: hint_veteran
+        to_triggering_node: true
+
+  # --- Near-cache second clue ---
+
+  - label: near_cache_clue
+    trigger:
+      type: near_waypoint
+      target: geocache
+      meters: 10
+    trigger_per_node: true
+    max_triggers: 1
+    exceptions:
+      - kind: node_has_flag
+        flag: found_cache
+    responses:
+      - type: send_message
+        message_label: near_cache_msg
+        to_triggering_node: true
+
+  # --- Cache found ---
+
+  - label: cache_found
+    trigger:
+      type: dm
+      message_label: password_cmd
+    trigger_per_node: true
+    max_triggers: 1
+    exceptions:
+      - kind: node_has_flag
+        flag: found_cache
+    responses:
+      - type: add_flag
+        flag_label: found_cache
+        to_triggering_node: true
+      - type: send_message
+        message_label: found_announcement
+        to_channel: geocaching
+
+  # --- Stale location refresh ---
+
+  - label: refresh_stale_location
+    trigger:
+      type: in_zone
+      target: search_zone
+    trigger_per_node: true
+    auto_recur: true
+    recur_mins: 10
+    responses:
+      - type: request_location
+        to_triggering_node: true
+
+  # --- Status ---
+
+  - label: status
+    trigger:
+      type: dm
+      message_label: status_cmd
+    responses:
+      - type: send_message
+        message_label: status_msg
+        to_triggering_node: true

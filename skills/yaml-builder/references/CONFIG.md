@@ -11,14 +11,16 @@ missing or misused.
 ## Top-level structure
 
 ```yaml
-channels:   [ ... ]
-zones:      [ ... ]
-waypoints:  [ ... ]
-messages:   [ ... ]
-flags:      [ ... ]
-nodes:      [ ... ]
-variables:  [ ... ]
-events:     [ ... ]
+channels:           [ ... ]
+zones:              [ ... ]
+waypoints:          [ ... ]
+messages:           [ ... ]
+flags:              [ ... ]
+nodes:              [ ... ]
+groups:             [ ... ]
+variables:          [ ... ]
+mutable_variables:  [ ... ]
+events:             [ ... ]
 ```
 
 All sections are optional; omitting a section is the same as providing an empty
@@ -130,8 +132,39 @@ messages:
 - Outgoing messages longer than 200 bytes are split at line boundaries and sent
   as multiple packets. Single lines longer than 200 bytes are split at the byte
   boundary.
-- For `CommandTrigger`, the incoming message text is compared against `text`
-  after stripping leading/trailing whitespace. Comparison is exact (case-sensitive).
+- For `dm` / `channel` triggers, the incoming message text is compared against
+  `text` after stripping leading/trailing whitespace. Comparison is exact
+  (case-sensitive).
+
+**Variable interpolation in messages:**
+
+Place `{variable_label}` anywhere in a message `text` field. Tokens are replaced
+at send time with the resolved value.
+
+Two built-in tokens are always available:
+
+| Token | Resolves to |
+|---|---|
+| `{node_id}` | The triggering node's ID (e.g. `!aabbccdd`), or `[unknown]` if no node context |
+| `{zone}` | The zone label the triggering node most recently entered or is currently in, or `[unknown]` |
+
+For user-defined variable tokens, see the [Variables](#variables) section. If
+resolution fails, the fallback strings are:
+
+- `[unknown]` — label undefined or required data unavailable
+- `[no node context]` — `scope: node` variable used in an event with no triggering node
+- `[no nodes]` — no eligible nodes for `nearest_node_*`
+
+All variable labels referenced in message text are validated at startup.
+
+```yaml
+messages:
+  - label: status
+    text: "There are {hunters_in_zone} hunters in the area. You are {dist_to_cache}m from the cache."
+
+  - label: found_announcement
+    text: "🎉 {node_id} found the cache in zone {zone}!"
+```
 
 ---
 
@@ -189,11 +222,36 @@ nodes:
 
 ---
 
+## Groups
+
+Groups are named collections of nodes, zones, or waypoints that can be used as
+targets for responses, `to_group` targeting, and group-based exception checks.
+Every group has a single `kind` — all members must be of the same type.
+
+```yaml
+groups:
+  - label: red_team
+    kind: node              # "node" | "zone" | "waypoint"
+    initial_members:        # optional — labels of the same kind as initial members
+      - scout_alpha
+```
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `label` | string | yes | Unique name used in responses and exceptions |
+| `kind` | string | yes | One of `node`, `zone`, or `waypoint`. All members must match. |
+| `initial_members` | list of labels | no | Labels of nodes/zones/waypoints to pre-populate at startup. Each must be defined in the corresponding top-level section. |
+
+Groups are populated dynamically via `add_to_group` / `remove_from_group`
+responses. `initial_members` seeds the group on startup (applied every restart).
+
+---
+
 ## Variables
 
-Variables compute live values from engine state and are interpolated into
-message text at send time using `{variable_label}` tokens. All values are
-read-only — computed on demand, stored nowhere.
+Computed variables read live values from engine state and expose them for
+message interpolation (`{label}`) and `variable_threshold` triggers. Values are
+read-only — computed on demand, never stored.
 
 ```yaml
 variables:
@@ -220,24 +278,6 @@ variables:
 | `zone_measure` | string | no | `centroid` (default) or `border` — used by `tracks: distance_to_zone` |
 | `node` | string | conditional | Node label — required for `tracks: distance_to_node` |
 | `exclude_flag` | string | no | Flag label — nodes carrying this flag are excluded from `nearest_node_distance` / `nearest_node_name` |
-
-**Message interpolation:**
-
-Place `{variable_label}` anywhere in a message `text` field. Tokens are replaced
-at send time with the resolved value. If resolution fails (missing context, no
-known location, etc.) the token is replaced with a fallback string:
-
-- `[unknown]` — label undefined or required data unavailable
-- `[no node context]` — `scope: node` variable used in an event with no triggering node
-- `[no nodes]` — no eligible nodes for `nearest_node_*`
-
-All variable labels referenced in message text are validated at startup.
-
-```yaml
-messages:
-  - label: status
-    text: "There are {hunters_in_zone} hunters in the area. You are {dist_to_cache}m from the cache."
-```
 
 ### Tracked types
 
@@ -287,6 +327,17 @@ Returns the count of nodes currently carrying the target flag.
   target: player             # flag label
 ```
 
+#### `group_count` — members in a group
+
+Returns the count of current members in the named group.
+
+```yaml
+- label: red_team_size
+  scope: global
+  tracks: group_count
+  target: red_team           # group label
+```
+
 #### `waypoint_node_count` — nodes near a waypoint
 
 Returns the count of nodes within `meters` of the target waypoint.
@@ -309,6 +360,79 @@ to the target waypoint. Requires a triggering node (`scope: node`).
   scope: node
   tracks: distance_to_waypoint
   target: hidden_cache       # waypoint label
+```
+
+#### `prev_distance_to_waypoint` — previous distance to a waypoint
+
+Distance in metres from the node's *previous* recorded position to the waypoint.
+Returns `[unknown]` if no prior position has been recorded.
+
+```yaml
+- label: prev_cache_distance
+  scope: node
+  tracks: prev_distance_to_waypoint
+  target: hidden_cache
+```
+
+#### `distance_change_to_waypoint` — movement toward or away from a waypoint
+
+Difference in metres between the current and previous distance to the waypoint:
+`current_dist − prev_dist`. Negative = moved closer; positive = moved farther.
+Rounded to one decimal place. Returns `[unknown]` if no prior position exists.
+
+Primary use: `variable_threshold` trigger to set direction flags (warmer/colder).
+
+```yaml
+- label: hint_delta
+  scope: node
+  tracks: distance_change_to_waypoint
+  target: hidden_cache
+
+# Use in a variable_threshold trigger:
+- label: mark_dir_closer
+  trigger:
+    type: variable_threshold
+    variable: hint_delta
+    operator: lt
+    value: -1         # moved more than 1 m closer
+  trigger_per_node: true
+  responses:
+    - type: add_flag
+      flag_label: dir_closer
+      to_triggering_node: true
+```
+
+#### `seconds_since_last_update` — seconds since node's last position fix
+
+Returns the number of whole seconds elapsed since the triggering node last sent
+a GPS position update. Returns `[unknown]` if no position has ever been received.
+
+```yaml
+- label: staleness
+  scope: node
+  tracks: seconds_since_last_update
+```
+
+#### `current_position` — triggering node's current coordinates
+
+Returns the node's current latitude and longitude as a formatted string
+(`"lat, lon"` to 5 decimal places). Returns `[unknown]` if no location known.
+
+```yaml
+- label: cur_pos
+  scope: node
+  tracks: current_position
+```
+
+#### `prev_position` — triggering node's previous coordinates
+
+Returns the node's *previous* recorded latitude and longitude, i.e. its location
+before the most recent position update. Returns `[unknown]` if no prior position.
+
+```yaml
+- label: prev_pos
+  scope: node
+  tracks: prev_position
 ```
 
 #### `distance_to_zone` — triggering node's distance to a zone
@@ -369,6 +493,46 @@ Supports the same optional `exclude_flag` field.
 
 ---
 
+## Mutable Variables
+
+Mutable variables store per-node or global integer, float, or string state that
+can be read, written, and incremented by event responses. Define them in the
+`mutable_variables:` section before referencing them.
+
+```yaml
+mutable_variables:
+  - label: score
+    type: integer
+    scope: global
+    initial: 0
+    min: 0          # optional — clamp floor (integer/float only)
+    max: 100        # optional — clamp ceiling
+
+  - label: hint_count
+    type: integer
+    scope: node     # tracked independently per node
+    initial: 0
+```
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `label` | string | yes | Unique name. Must not conflict with any label in `variables:`. |
+| `type` | string | yes | `integer`, `float`, or `string` |
+| `scope` | string | yes | `global` (one value shared across all nodes) or `node` (one value per node) |
+| `initial` | int/float/string | yes | Starting value. Must match `type`. |
+| `min` | number | no | Clamp floor for integer/float. Ignored for string. |
+| `max` | number | no | Clamp ceiling for integer/float. Ignored for string. |
+
+**Notes:**
+- `min` and `max` are enforced by `set_variable` and `increment_variable` at
+  write time. The `initial` value must fall within `[min, max]` if both are set.
+- Mutable variable labels are interpolated in messages the same way as computed
+  variables: `{hint_count}` in a message resolves to the triggering node's
+  current value when `scope: node`, or the global value when `scope: global`.
+- Use `variable_threshold` triggers on mutable variables to react to value changes.
+
+---
+
 ## Events
 
 Events are the core of the game logic. Each event has a single **trigger**, one
@@ -420,6 +584,7 @@ Each event has exactly one trigger, defined as an object with a `type` field.
 Fires when the bot receives a location update from any node and that node is
 within `meters` of the named waypoint.
 
+**Static waypoint variant:**
 ```yaml
 trigger:
   type: near_waypoint
@@ -427,10 +592,23 @@ trigger:
   meters: 20               # radius in metres
 ```
 
+**Dynamic waypoint variant** (any waypoint carrying a specific flag):
+```yaml
+trigger:
+  type: near_waypoint
+  target_flag: laser_target   # fires for any dynamic waypoint with this flag
+  meters: 1609
+```
+
 | Field | Required | Description |
 |---|---|---|
-| `target` | yes | A `waypoints` label |
+| `target` | one of | A `waypoints` label — targets a single static waypoint |
+| `target_flag` | one of | A `flags` label — targets any *dynamic* waypoint currently carrying this flag. Exactly one of `target` or `target_flag` must be set. |
 | `meters` | yes | Radius in metres. The trigger fires if the node is within this distance. |
+
+When `target_flag` is used, the nearest in-range dynamic waypoint becomes the
+`triggering_waypoint_id` for responses like `to_all_near_triggering_waypoint`,
+`add_waypoint_flag`, `remove_waypoint_flag`, and `destroy_waypoint`.
 
 #### `near_zone` — node enters zone proximity
 
@@ -577,6 +755,12 @@ trigger:
 | `message_label` | yes | A `messages` label. The incoming DM text is compared to `message.text` after stripping whitespace. |
 | `zone_label` | no | A `zones` label. If set, the sender must have a known location inside this zone. Omit to allow any node to trigger. |
 
+**Important:** `variable_threshold` triggers also evaluate at DM receipt time
+(when a `dm` trigger event is processed, all `variable_threshold` events for
+node-scoped variables are also checked). This means you can silently fire
+side-effects (like `request_location`) on any DM from a node whose variable
+value meets a threshold, without adding logic to the DM event itself.
+
 #### `channel` — node sends a matching message on a monitored channel
 
 Fires when any node broadcasts a message on a specific channel whose text
@@ -596,6 +780,91 @@ trigger:
 | `message_label` | yes | A `messages` label |
 | `zone_label` | no | A `zones` label — if set, sender must be inside this zone |
 | `channel_label` | yes | A `channels` label — message must arrive on this channel |
+
+#### `variable_threshold` — a variable crosses a threshold
+
+Fires when a variable's current value satisfies the operator comparison against
+the threshold value. Evaluation timing depends on variable type:
+
+- **Node-scoped mutable variables**: evaluated when the node sends a DM or position update.
+- **Node-scoped computed variables** (e.g. `distance_change_to_waypoint`): evaluated on every position update from that node.
+- **Global mutable variables** and **global/unscoped computed variables**: evaluated on the periodic tick (every ~60 seconds).
+
+```yaml
+trigger:
+  type: variable_threshold
+  variable: hint_count     # mutable_variables or variables label
+  operator: gte            # lt | lte | eq | neq | gte | gt
+  value: 10
+```
+
+| Field | Required | Description |
+|---|---|---|
+| `variable` | yes | A `variables` or `mutable_variables` label |
+| `operator` | yes | One of `lt`, `lte`, `eq`, `neq`, `gte`, `gt` |
+| `value` | yes | The threshold to compare against. Must be numeric for numeric operators. |
+
+**Notes:**
+- String-typed mutable variables only support `eq` and `neq`.
+- Computed variables that return `[unknown]` (e.g. no prior position for
+  `distance_change_to_waypoint`) will not satisfy numeric operators — the
+  trigger silently skips rather than erroring.
+- Use `trigger_per_node: true` so the threshold fires independently per node.
+- Use `reset_mins` to prevent repeated firing once the threshold is met:
+  ```yaml
+  - label: refresh_stale_location
+    trigger:
+      type: variable_threshold
+      variable: seconds_since_update
+      operator: gte
+      value: 300
+    trigger_per_node: true
+    reset_mins: 5
+    responses:
+      - type: request_location
+        to_triggering_node: true
+  ```
+
+#### `flag_expired` — a flag's expiry timer fires
+
+Fires when a flag with `expiry_mins` set reaches its expiry time and is removed
+from a node, zone, waypoint, or dynamic waypoint.
+
+```yaml
+trigger:
+  type: flag_expired
+  flag_label: armed           # flags label — must have expiry_mins set
+  target_kind: dynamic_waypoint   # node | zone | waypoint | dynamic_waypoint
+```
+
+| Field | Required | Description |
+|---|---|---|
+| `flag_label` | yes | A `flags` label. The flag must have `expiry_mins` defined. |
+| `target_kind` | yes | The entity type the flag expired on: `node`, `zone`, `waypoint`, or `dynamic_waypoint`. |
+
+**Notes:**
+- When `target_kind: dynamic_waypoint`, responses have access to waypoint
+  context (`to_all_near_triggering_waypoint`, `add_waypoint_flag`, etc.).
+- When `target_kind: node`, responses have access to node context
+  (`to_triggering_node`).
+- For other `target_kind` values there is no triggering node, so
+  `to_triggering_node` is not valid.
+
+#### `waypoint_expired` — a dynamic waypoint's expiry timer fires
+
+Fires when a dynamic waypoint created with `expiry_mins` reaches its expiry and
+is destroyed. Optional `had_flag` restricts the trigger to waypoints that
+carried a specific flag at the time of expiry.
+
+```yaml
+trigger:
+  type: waypoint_expired
+  had_flag: laser_target    # optional — only fire for waypoints that had this flag
+```
+
+| Field | Required | Description |
+|---|---|---|
+| `had_flag` | no | A `flags` label. If set, only fires for expired waypoints that carried this flag. Omit to fire for any expired dynamic waypoint. |
 
 ---
 
@@ -661,6 +930,50 @@ not respond depending on firmware version and settings.
 |---|---|---|
 | target key | yes | One target key (see Targets). Only node-resolving targets are meaningful here. |
 
+#### `set_variable` — assign a value to a mutable variable
+
+Sets a mutable variable to a specific value. Values are clamped to `[min, max]`
+if those are defined on the variable.
+
+```yaml
+- type: set_variable
+  variable_label: score      # mutable_variables label
+  value: 0
+  # no target required for global variables
+```
+
+For node-scoped variables a target is required:
+```yaml
+- type: set_variable
+  variable_label: hint_count
+  value: 0
+  to_triggering_node: true   # target — required for scope: node
+```
+
+| Field | Required | Description |
+|---|---|---|
+| `variable_label` | yes | A `mutable_variables` label |
+| `value` | yes | The value to assign. Coerced to the variable's `type`. |
+| target key | conditional | Required when the variable's `scope` is `node`. Must not be present for `scope: global`. |
+
+#### `increment_variable` — add an amount to a mutable variable
+
+Adds `amount` to the current value of a numeric mutable variable. The result is
+clamped to `[min, max]` if those are defined. Not valid for `type: string`.
+
+```yaml
+- type: increment_variable
+  variable_label: hint_count
+  amount: 1
+  to_triggering_node: true   # required for scope: node
+```
+
+| Field | Required | Description |
+|---|---|---|
+| `variable_label` | yes | A `mutable_variables` label with `type: integer` or `float` |
+| `amount` | yes | Amount to add (positive or negative) |
+| target key | conditional | Required when `scope: node`. Must not be present for `scope: global`. |
+
 #### `disable_event` — disable an event at runtime
 
 Prevents an event from firing until re-enabled. Equivalent to the event having
@@ -707,6 +1020,25 @@ disable one.
 | `event_label` | yes | An `events` label |
 | `value` | yes | Integer. The `times_triggered` counter is set to exactly this value. |
 
+#### `add_to_group` / `remove_from_group` — manage group membership
+
+Adds or removes a node (or zone/waypoint, depending on group `kind`) from a group.
+
+```yaml
+- type: add_to_group
+  group_label: red_team
+  to_triggering_node: true
+
+- type: remove_from_group
+  group_label: red_team
+  to_all_with_flag: eliminated
+```
+
+| Field | Required | Description |
+|---|---|---|
+| `group_label` | yes | A `groups` label |
+| target key | yes | One target key. The resolved entities must match the group's `kind`. |
+
 #### `random_options` — select one of several weighted outcome branches at random
 
 Picks one branch at random (weighted) and executes its responses. All other
@@ -748,30 +1080,121 @@ within the chosen branch share the same context as the parent event.
 - Weights are relative — `[3, 1, 1]` gives 60%/20%/20%; `[1, 1]` gives 50%/50%.
 - `random_options` can be nested: a branch's `responses` list may itself contain
   another `random_options` entry.
-- Each nested branch is validated at startup just like top-level responses —
-  all label references must resolve.
-- `times_triggered` is incremented once per event firing regardless of which
-  branch was chosen.
+
+#### `with_node` — execute responses in the context of a selected node
+
+Resolves a target to one or more node IDs and re-executes a set of inner
+responses with each selected node as the triggering node. The primary use is
+selecting a random node from a pool and then acting on it (e.g. creating a
+dynamic waypoint at their location).
+
+```yaml
+- type: with_node
+  to_all_with_flag: valid_target
+  random_n: 1              # optional — pick N at random from the resolved set
+  responses:
+    - type: create_waypoint
+      expiry_mins: 60
+      initial_flags:
+        - laser_target
+    - type: send_message
+      message_label: you_are_targeted
+      to_triggering_node: true
+```
+
+| Field | Required | Description |
+|---|---|---|
+| target key | yes | Any node-resolving target (not `to_channel`). The inner responses fire once per resolved node. |
+| `responses` | yes | List of inner responses. Each runs with the selected node as context. |
+
+**Restrictions inside `with_node`:**
+- `destroy_waypoint`, `add_waypoint_flag`, and `remove_waypoint_flag` are not
+  valid inside `with_node` (no triggering waypoint context).
+- `to_all_near_triggering_waypoint` is not valid inside `with_node`.
+
+#### `create_waypoint` — place a dynamic waypoint at the triggering node's location
+
+Creates a temporary waypoint at the current position of the triggering node.
+The waypoint can carry flags and has an optional expiry timer.
+
+```yaml
+- type: create_waypoint
+  expiry_mins: 60        # optional — waypoint self-destructs after this many minutes
+  initial_flags:
+    - laser_target        # flags applied to the new waypoint (must be defined in flags:)
+```
+
+| Field | Required | Description |
+|---|---|---|
+| `expiry_mins` | no | Minutes until the waypoint is automatically destroyed. Omit for a permanent waypoint. |
+| `initial_flags` | no | List of flag labels to apply to the new waypoint at creation. |
+
+**Restriction:** `create_waypoint` requires a trigger that provides node context
+(`enters_zone`, `leaves_zone`, `near_waypoint`, `near_node`, `dm`, `channel`,
+`flag_expired` with `target_kind: node`, or inside `with_node`). It cannot
+appear directly in `time_window` or `in_zone_on_start` events.
+
+#### `add_waypoint_flag` / `remove_waypoint_flag` — modify a dynamic waypoint's flags
+
+Add or remove a flag on the *triggering dynamic waypoint* — the waypoint that
+caused the current event to fire. Only valid in `near_waypoint + target_flag`
+events and `flag_expired + target_kind: dynamic_waypoint` events.
+
+```yaml
+- type: add_waypoint_flag
+  flag_label: detonated
+
+- type: remove_waypoint_flag
+  flag_label: armed
+```
+
+| Field | Required | Description |
+|---|---|---|
+| `flag_label` | yes | A `flags` label |
+
+#### `destroy_waypoint` — delete the triggering dynamic waypoint
+
+Immediately removes the triggering dynamic waypoint. Only valid in the same
+contexts as `add_waypoint_flag`.
+
+```yaml
+- type: destroy_waypoint
+```
 
 ---
 
 ### Targets
 
-Every response (except `set_event_triggers`) requires exactly one target key.
-The key determines which node(s), zone, or waypoint the response acts on.
+Every response (except `set_event_triggers`, `disable_event`, `enable_event`,
+`add_waypoint_flag`, `remove_waypoint_flag`, and `destroy_waypoint`) requires
+exactly one target key. The key determines which node(s), zone, or waypoint the
+response acts on.
 
 | Target key | Value type | Resolves to | Notes |
 |---|---|---|---|
-| `to_triggering_node: true` | boolean | The single node whose packet caused the event to fire | Not available in `time_window` or `in_zone_on_start` events, which have no triggering node |
+| `to_triggering_node: true` | boolean | The single node whose packet caused the event to fire | Not available in `time_window`, `in_zone_on_start`, `waypoint_expired`, or `flag_expired` with non-node `target_kind` |
 | `to_node: <label>` | node label | The single hard-coded node with that label | |
 | `to_channel: <label>` | channel label | Broadcasts the message on that channel | `send_message` only |
 | `to_zone: <label>` | zone label | The zone object itself | `add_flag` / `remove_flag` only — sets the flag on the zone, not on individual nodes |
 | `to_flag: <label>` | flag label | All nodes that currently carry that flag | |
 | `to_waypoint_radius: {waypoint: <label>, meters: <n>}` | object | All nodes within `meters` of the waypoint | |
-| `to_all_in_zone: <label>` | zone label | All nodes with a known location currently inside the zone | |
-| `to_all_with_flag: <label>` | flag label | All nodes that currently carry that flag | |
-| `to_all_near_waypoint: {waypoint: <label>, meters: <n>}` | object | All nodes within `meters` of the waypoint | |
-| `to_all_near_node: {node: <label>, meters: <n>}` | object | All nodes within `meters` of the named hard-coded node (excluding the target node itself) | Both nodes must have known locations |
+| `to_all_in_zone: <label>` | zone label | All nodes with a known location currently inside the zone | Supports `random_n` |
+| `to_all_with_flag: <label>` | flag label | All nodes that currently carry that flag | Supports `random_n` |
+| `to_all_near_waypoint: {waypoint: <label>, meters: <n>}` | object | All nodes within `meters` of the waypoint | Supports `random_n` |
+| `to_all_near_node: {node: <label>, meters: <n>}` | object | All nodes within `meters` of the named hard-coded node (excluding the target node itself) | Both nodes must have known locations; supports `random_n` |
+| `to_all_near_triggering_waypoint: {meters: <n>}` | object | All nodes within `meters` of the triggering dynamic waypoint | Only in `near_waypoint + target_flag` or `flag_expired + dynamic_waypoint` events; supports `random_n` |
+| `to_group: <label>` | group label | All current members of the named group | Supports `random_n` |
+
+**`random_n`:** Any target marked "supports `random_n`" accepts an optional
+`random_n: <integer>` field on the response. If the resolved set is larger than
+`random_n`, a random subset of exactly that size is used.
+
+```yaml
+- type: send_message
+  message_label: targeted
+  to_all_with_flag: valid_target
+  random_n: 1           # DM only one random node from all valid targets
+```
 
 ---
 
@@ -794,9 +1217,10 @@ exceptions:
 | Field | Required | Description |
 |---|---|---|
 | `kind` | yes | One of the exception kinds listed below |
-| `flag` | conditional | A `flags` label. Required for all flag-check kinds; not used by `random_skip`. |
-| `target` | conditional | Required for `zone_*` and `waypoint_*` kinds. Omit for `node_*` kinds. |
+| `flag` | conditional | A `flags` label. Required for all flag-check kinds. |
+| `target` | conditional | Required for `zone_*` and `waypoint_*` kinds, and for zone/waypoint group kinds. |
 | `chance` | conditional | Float 0.0–1.0. Required for `random_skip`. |
+| `group` | conditional | A `groups` label. Required for `*_in_group` / `*_not_in_group` kinds. |
 
 | Kind | Fields | Meaning |
 |---|---|---|
@@ -804,17 +1228,23 @@ exceptions:
 | `node_lacks_flag` | `flag` | Skip if the triggering node does not have this flag |
 | `zone_has_flag` | `flag`, `target` (zone) | Skip if the named zone has this flag |
 | `zone_lacks_flag` | `flag`, `target` (zone) | Skip if the named zone does not have this flag |
-| `waypoint_has_flag` | `flag`, `target` (waypoint) | Skip if the named waypoint has this flag |
-| `waypoint_lacks_flag` | `flag`, `target` (waypoint) | Skip if the named waypoint does not have this flag |
+| `waypoint_has_flag` | `flag`, optional `target` (waypoint) | Skip if the named (or triggering dynamic) waypoint has this flag |
+| `waypoint_lacks_flag` | `flag`, optional `target` (waypoint) | Skip if the named (or triggering dynamic) waypoint does not have this flag |
+| `node_in_group` | `group` | Skip if the triggering node is a member of this group |
+| `node_not_in_group` | `group` | Skip if the triggering node is not a member of this group |
+| `zone_in_group` | `group`, `target` (zone) | Skip if the named zone is a member of this group |
+| `zone_not_in_group` | `group`, `target` (zone) | Skip if the named zone is not a member of this group |
+| `waypoint_in_group` | `group`, `target` (waypoint) | Skip if the named waypoint is a member of this group |
+| `waypoint_not_in_group` | `group`, `target` (waypoint) | Skip if the named waypoint is not a member of this group |
 | `random_skip` | `chance` | Skip with probability `chance` (e.g. `0.3` = 30% chance of skipping) |
 
-**Evaluation order:** All flag-check exceptions are evaluated first. `random_skip` is rolled only
-if every flag-check exception passes. This ensures a deterministic exception (e.g. "player already
-has the winner flag") always takes precedence over randomness.
+**Evaluation order:** All flag-check and group-check exceptions are evaluated
+first. `random_skip` is rolled only if every deterministic exception passes. This
+ensures a deterministic exception (e.g. "player already has the winner flag")
+always takes precedence over randomness.
 
 **Note:** For `time_window` and `in_zone_on_start` triggers there is no
-triggering node, so `node_has_flag` and `node_lacks_flag` exceptions will never
-match and will not cause a skip.
+triggering node, so `node_*` exceptions will never match and will not cause a skip.
 
 ```yaml
 exceptions:
@@ -873,12 +1303,34 @@ conditions are violated:
 - Every label referenced in a trigger, response, or exception must be defined in
   the corresponding top-level section.
 - `near_waypoint`, `near_zone`, and `near_node` triggers require `meters` to be set. `in_zone` and `in_zone_on_start` do not use `meters`.
+- `near_waypoint` requires exactly one of `target` (static waypoint) or `target_flag` (dynamic waypoint), not both.
 - `channel` triggers require `channel_label`.
 - `zone_has_flag` / `zone_lacks_flag` exceptions require `target`.
-- `waypoint_has_flag` / `waypoint_lacks_flag` exceptions require `target`.
+- `waypoint_has_flag` / `waypoint_lacks_flag` without `target` are only valid in dynamic waypoint event contexts.
 - `random_skip` exceptions require `chance` (float 0.0–1.0). `flag` and `target` are not used.
 - `random_options` responses require at least 2 options, each with `weight > 0` and at least one response. All labels inside nested branches are validated the same way as top-level responses.
 - Each `nodes` entry's `initial_flags` must all reference defined flags.
+- `mutable_variables` labels must not duplicate any `variables` label.
+- `mutable_variables` `type` must be `integer`, `float`, or `string`.
+- `mutable_variables` `scope` must be `global` or `node`.
+- `mutable_variables` `initial` must match the declared `type`.
+- `mutable_variables` `min`/`max` are not valid for `type: string`.
+- `mutable_variables` `initial` must be within `[min, max]` if both are set.
+- `set_variable` / `increment_variable` on a `scope: node` variable require a target; on `scope: global` must not have a target.
+- `increment_variable` is not valid for `type: string` variables.
+- `create_waypoint` requires a trigger that provides node context.
+- `destroy_waypoint`, `add_waypoint_flag`, `remove_waypoint_flag` require a dynamic waypoint context (`near_waypoint + target_flag` or `flag_expired + target_kind: dynamic_waypoint`).
+- `to_all_near_triggering_waypoint` requires a dynamic waypoint context.
+- `with_node` target cannot be `to_channel`.
+- `with_node` must have at least one inner response.
+- `destroy_waypoint`, `add_waypoint_flag`, `remove_waypoint_flag`, and `to_all_near_triggering_waypoint` are not valid inside `with_node`.
+- `random_n` must be a positive integer when present.
+- `groups` `kind` must be `node`, `zone`, or `waypoint`. `initial_members` must reference defined labels of the matching kind.
+- Group exceptions (`*_in_group`, `*_not_in_group`) require `group`, which must reference a group of the matching kind.
+- `variable_threshold` `operator` must be one of `lt`, `lte`, `eq`, `neq`, `gte`, `gt`.
+- String-type mutable variables in `variable_threshold` only support `eq` and `neq`.
+- `flag_expired` `target_kind` must be `node`, `zone`, `waypoint`, or `dynamic_waypoint`.
+- All `{token}` references in message text must be defined variable labels or the built-in tokens `node_id` and `zone`.
 
 Errors are reported with the event label and field that caused the problem, for
 example:
