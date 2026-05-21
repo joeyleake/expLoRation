@@ -2,20 +2,19 @@
 #
 # A single search zone with one hidden cache waypoint. Nodes are welcomed
 # on zone entry with a clue and can DM !hint for warmer/colder feedback
-# based on their last two known positions. After 5 hints the distance in
-# meters is included. A second clue fires automatically within 10 m. The
-# player wins by DMing the cache password, which announces their success
-# to the Geocaching channel.
+# based on their last two known positions. After 5 hints the distance is
+# included; after 10 hints the cardinal direction is added as well. A second
+# clue fires automatically within 10 m. The player wins by DMing the cache
+# password, which announces their success to the Geocaching channel.
 #
 # Warmer/colder routing uses two flags (dir_closer, dir_farther) set on
-# each position update via distance_change_to_waypoint. All six hint
-# variants check a shared hint_cooldown flag (expiry_mins: 1) for rate
-# limiting rather than reset_mins, ensuring a single cooldown applies
-# across all warmer/colder branches.
+# each position update via distance_change_to_waypoint. The nine hint
+# variants (3 directions × 3 tiers) share a hint_cooldown flag (expiry_mins: 1)
+# for rate limiting rather than reset_mins, ensuring a single cooldown applies
+# across all branches.
 #
-# Note: hint_veteran (granted at 5 uses) is awarded on the next position
-# update after hint_count reaches 5, not the instant the 5th hint fires.
-# In practice this means at most one extra basic hint before the upgrade.
+# Tier promotions (hint_veteran at 5 uses, hint_expert at 10 uses) take effect
+# on the same DM that crosses the threshold.
 #
 # CONFIGURE: replace all coordinates before deployment.
 
@@ -51,6 +50,7 @@ flags:
   - label: visited_zone    # permanent; distinguishes first entry from re-entry
   - label: found_cache     # permanent; prevents duplicate win announcements
   - label: hint_veteran    # permanent; granted at 5 hints — unlocks distance readout
+  - label: hint_expert     # permanent; granted at 10 hints — unlocks distance + cardinal direction
   - label: hint_cooldown
     expiry_mins: 1         # shared rate limit across all hint variants
   - label: dir_closer      # set on position update when node moved toward cache
@@ -99,6 +99,15 @@ messages:
   - label: hint_same_dist_msg
     text: "↔️ About the same. You're roughly {dist_to_cache}m from the cache. Try a new direction."
 
+  - label: hint_warmer_expert_msg
+    text: "🔥 Warmer! Approximately {dist_to_cache}m to go — head {cardinal_to_cache} ({bearing_to_cache})."
+
+  - label: hint_colder_expert_msg
+    text: "🧊 Colder. You're about {dist_to_cache}m away — turn around. Cache is {cardinal_to_cache} ({bearing_to_cache})."
+
+  - label: hint_same_expert_msg
+    text: "↔️ About the same. You're roughly {dist_to_cache}m from the cache — it's {cardinal_to_cache} ({bearing_to_cache}). Try a new direction."
+
   - label: near_cache_msg
     text: |
       🔥🔥 You're right on top of it! Second clue:
@@ -129,6 +138,16 @@ variables:
   - label: hint_delta
     scope: node
     tracks: distance_change_to_waypoint
+    target: geocache
+
+  - label: bearing_to_cache
+    scope: node
+    tracks: bearing_to_waypoint
+    target: geocache
+
+  - label: cardinal_to_cache
+    scope: node
+    tracks: cardinal_to_waypoint
     target: geocache
 
   - label: seconds_since_update
@@ -213,12 +232,13 @@ events:
         flag_label: dir_closer
         to_triggering_node: true
 
-  # --- Hint responses: basic (fewer than 10 uses) ---
+  # --- Hint responses: basic (< 5 uses) ---
   # Exception logic:
   #   hint_warmer: fires when node HAS dir_closer (node_lacks_flag: dir_closer skips it if absent)
   #   hint_colder: fires when node HAS dir_farther AND NOT dir_closer
   #   hint_same:   fires when node has NEITHER flag (both has_flag exceptions skip it if present)
-  # All three: skip if hint_cooldown active; skip if hint_veteran (veteran events handle those)
+  # All three: skip if hint_cooldown active; skip if hint_veteran (veteran/expert events handle those)
+  # All three: clear both direction flags so repeat !hint without movement returns hint_same
 
   - label: hint_warmer_basic
     trigger:
@@ -236,6 +256,12 @@ events:
     responses:
       - type: send_message
         message_label: hint_warmer_msg
+        to_triggering_node: true
+      - type: remove_flag
+        flag_label: dir_closer
+        to_triggering_node: true
+      - type: remove_flag
+        flag_label: dir_farther
         to_triggering_node: true
       - type: add_flag
         flag_label: hint_cooldown
@@ -263,6 +289,12 @@ events:
     responses:
       - type: send_message
         message_label: hint_colder_msg
+        to_triggering_node: true
+      - type: remove_flag
+        flag_label: dir_closer
+        to_triggering_node: true
+      - type: remove_flag
+        flag_label: dir_farther
         to_triggering_node: true
       - type: add_flag
         flag_label: hint_cooldown
@@ -299,7 +331,7 @@ events:
         amount: 1
         to_triggering_node: true
 
-  # --- Hint responses: veteran (10+ uses, includes distance) ---
+  # --- Hint responses: veteran (5–9 uses, includes distance) ---
 
   - label: hint_warmer_veteran
     trigger:
@@ -312,11 +344,19 @@ events:
         flag: hint_cooldown
       - kind: node_lacks_flag
         flag: hint_veteran
+      - kind: node_has_flag
+        flag: hint_expert
       - kind: node_lacks_flag
         flag: dir_closer
     responses:
       - type: send_message
         message_label: hint_warmer_dist_msg
+        to_triggering_node: true
+      - type: remove_flag
+        flag_label: dir_closer
+        to_triggering_node: true
+      - type: remove_flag
+        flag_label: dir_farther
         to_triggering_node: true
       - type: add_flag
         flag_label: hint_cooldown
@@ -338,12 +378,20 @@ events:
       - kind: node_lacks_flag
         flag: hint_veteran
       - kind: node_has_flag
+        flag: hint_expert
+      - kind: node_has_flag
         flag: dir_closer
       - kind: node_lacks_flag
         flag: dir_farther
     responses:
       - type: send_message
         message_label: hint_colder_dist_msg
+        to_triggering_node: true
+      - type: remove_flag
+        flag_label: dir_closer
+        to_triggering_node: true
+      - type: remove_flag
+        flag_label: dir_farther
         to_triggering_node: true
       - type: add_flag
         flag_label: hint_cooldown
@@ -365,6 +413,8 @@ events:
       - kind: node_lacks_flag
         flag: hint_veteran
       - kind: node_has_flag
+        flag: hint_expert
+      - kind: node_has_flag
         flag: dir_closer
       - kind: node_has_flag
         flag: dir_farther
@@ -380,7 +430,100 @@ events:
         amount: 1
         to_triggering_node: true
 
-  # --- Veteran upgrade ---
+  # --- Hint responses: expert (10+ uses, includes distance + cardinal direction) ---
+
+  - label: hint_warmer_expert
+    trigger:
+      type: dm
+      message_label: hint_cmd
+      zone_label: search_zone
+    trigger_per_node: true
+    exceptions:
+      - kind: node_has_flag
+        flag: hint_cooldown
+      - kind: node_lacks_flag
+        flag: hint_expert
+      - kind: node_lacks_flag
+        flag: dir_closer
+    responses:
+      - type: send_message
+        message_label: hint_warmer_expert_msg
+        to_triggering_node: true
+      - type: remove_flag
+        flag_label: dir_closer
+        to_triggering_node: true
+      - type: remove_flag
+        flag_label: dir_farther
+        to_triggering_node: true
+      - type: add_flag
+        flag_label: hint_cooldown
+        to_triggering_node: true
+      - type: increment_variable
+        variable_label: hint_count
+        amount: 1
+        to_triggering_node: true
+
+  - label: hint_colder_expert
+    trigger:
+      type: dm
+      message_label: hint_cmd
+      zone_label: search_zone
+    trigger_per_node: true
+    exceptions:
+      - kind: node_has_flag
+        flag: hint_cooldown
+      - kind: node_lacks_flag
+        flag: hint_expert
+      - kind: node_has_flag
+        flag: dir_closer
+      - kind: node_lacks_flag
+        flag: dir_farther
+    responses:
+      - type: send_message
+        message_label: hint_colder_expert_msg
+        to_triggering_node: true
+      - type: remove_flag
+        flag_label: dir_closer
+        to_triggering_node: true
+      - type: remove_flag
+        flag_label: dir_farther
+        to_triggering_node: true
+      - type: add_flag
+        flag_label: hint_cooldown
+        to_triggering_node: true
+      - type: increment_variable
+        variable_label: hint_count
+        amount: 1
+        to_triggering_node: true
+
+  - label: hint_same_expert
+    trigger:
+      type: dm
+      message_label: hint_cmd
+      zone_label: search_zone
+    trigger_per_node: true
+    exceptions:
+      - kind: node_has_flag
+        flag: hint_cooldown
+      - kind: node_lacks_flag
+        flag: hint_expert
+      - kind: node_has_flag
+        flag: dir_closer
+      - kind: node_has_flag
+        flag: dir_farther
+    responses:
+      - type: send_message
+        message_label: hint_same_expert_msg
+        to_triggering_node: true
+      - type: add_flag
+        flag_label: hint_cooldown
+        to_triggering_node: true
+      - type: increment_variable
+        variable_label: hint_count
+        amount: 1
+        to_triggering_node: true
+
+  # --- Veteran / expert upgrades ---
 
   - label: grant_hint_veteran
     trigger:
@@ -393,6 +536,19 @@ events:
     responses:
       - type: add_flag
         flag_label: hint_veteran
+        to_triggering_node: true
+
+  - label: grant_hint_expert
+    trigger:
+      type: variable_threshold
+      variable: hint_count
+      operator: gte
+      value: 10
+    trigger_per_node: true
+    max_triggers: 1
+    responses:
+      - type: add_flag
+        flag_label: hint_expert
         to_triggering_node: true
 
   # --- Near-cache second clue ---
