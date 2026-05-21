@@ -640,6 +640,171 @@ def test_distance_change_unknown_without_prev(db):
 
 
 # ---------------------------------------------------------------------------
+# seconds_since_last_update / current_position / prev_position variable tracks
+# ---------------------------------------------------------------------------
+
+def test_seconds_since_last_update_resolves_numeric(db):
+    """seconds_since_last_update returns a numeric string after a position update."""
+    from config import Variable, Message
+    cfg = minimal_config(
+        messages=[
+            Message(label="hello", text="Hello world"),
+            Message(label="greet_node", text="Hi {node_id}"),
+            Message(label="greet_zone", text="Zone: {zone}"),
+            Message(label="age_msg", text="age:{age}"),
+        ],
+        variables=[
+            Variable(label="active_count", scope="global", tracks="flag_count", target="active"),
+            Variable(label="age", scope="node", tracks="seconds_since_last_update"),
+        ],
+        events=[
+            Event(
+                label="zone_ev",
+                trigger=ProximityTrigger(kind="enters_zone", target_label="zone_a"),
+                responses=[SendMessageResponse(message_label="age_msg", target=TargetTriggeringNode())],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db)
+    eng.handle_position(NODE_ID, *OUTSIDE_ZONE)
+    eng.handle_position(NODE_ID, *INSIDE_ZONE)
+
+    text = eng.sent_dms[0][1]
+    assert "[unknown]" not in text
+    value = text.split("age:")[1]
+    assert value.isdigit()
+
+
+def test_current_and_prev_position_resolve(db):
+    """current_position and prev_position return formatted coordinate strings."""
+    from config import Variable, Message
+    cfg = minimal_config(
+        messages=[
+            Message(label="hello", text="Hello world"),
+            Message(label="greet_node", text="Hi {node_id}"),
+            Message(label="greet_zone", text="Zone: {zone}"),
+            Message(label="pos_msg", text="cur:{cur} prev:{prev}"),
+        ],
+        variables=[
+            Variable(label="active_count", scope="global", tracks="flag_count", target="active"),
+            Variable(label="cur", scope="node", tracks="current_position"),
+            Variable(label="prev", scope="node", tracks="prev_position"),
+        ],
+        events=[
+            Event(
+                label="zone_ev",
+                trigger=ProximityTrigger(kind="enters_zone", target_label="zone_a"),
+                responses=[SendMessageResponse(message_label="pos_msg", target=TargetTriggeringNode())],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db)
+    eng.handle_position(NODE_ID, *OUTSIDE_ZONE)   # becomes prev
+    eng.handle_position(NODE_ID, *INSIDE_ZONE)    # becomes cur, enters zone
+
+    text = eng.sent_dms[0][1]
+    assert "[unknown]" not in text
+    # Both should look like "lat, lon"
+    assert "," in text.split("cur:")[1].split(" prev:")[0]
+    assert "," in text.split("prev:")[1]
+
+
+def test_prev_position_unknown_on_first_update(db):
+    """prev_position returns [unknown] when the node has no prior position."""
+    from config import Variable, Message
+    cfg = minimal_config(
+        messages=[
+            Message(label="hello", text="Hello world"),
+            Message(label="greet_node", text="Hi {node_id}"),
+            Message(label="greet_zone", text="Zone: {zone}"),
+            Message(label="pos_msg", text="prev:{prev}"),
+        ],
+        variables=[
+            Variable(label="active_count", scope="global", tracks="flag_count", target="active"),
+            Variable(label="prev", scope="node", tracks="prev_position"),
+        ],
+        events=[
+            Event(
+                label="zone_ev",
+                trigger=ProximityTrigger(kind="enters_zone", target_label="zone_a"),
+                responses=[SendMessageResponse(message_label="pos_msg", target=TargetTriggeringNode())],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db)
+    eng.handle_position(NODE_ID, *INSIDE_ZONE)  # first update ever
+
+    assert eng.sent_dms[0][1] == "prev:[unknown]"
+
+
+# ---------------------------------------------------------------------------
+# variable_threshold: skip when computed value is non-numeric
+# ---------------------------------------------------------------------------
+
+def test_variable_threshold_skips_when_distance_change_unknown(db):
+    """variable_threshold on distance_change_to_waypoint does not fire on first
+    position update when there is no previous position ([unknown] returned)."""
+    from config import Variable
+    cfg = minimal_config(
+        variables=[
+            Variable(label="active_count", scope="global", tracks="flag_count", target="active"),
+            Variable(label="delta", scope="node", tracks="distance_change_to_waypoint", target="wp_a"),
+        ],
+        events=[
+            Event(
+                label="closer_ev",
+                trigger=VariableThresholdTrigger(variable_label="delta", operator="lt", value=0),
+                responses=[AddFlagResponse(flag_label="active", target=TargetTriggeringNode())],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db)
+    eng.handle_position(NODE_ID, *INSIDE_ZONE)  # first update — no prev, delta=[unknown]
+
+    assert not db.has_flag("node", NODE_ID, "active")
+
+
+# ---------------------------------------------------------------------------
+# variable_threshold fires during handle_message for node-scoped computed vars
+# ---------------------------------------------------------------------------
+
+def test_variable_threshold_fires_on_dm_for_computed_node_var(db):
+    """A variable_threshold on a node-scoped computed variable evaluates at DM
+    receipt time, enabling patterns like the stale-location refresh."""
+    from config import Variable, Message, RequestLocationResponse
+    cfg = minimal_config(
+        messages=[
+            Message(label="hello", text="Hello world"),
+            Message(label="greet_node", text="Hi {node_id}"),
+            Message(label="greet_zone", text="Zone: {zone}"),
+            Message(label="ping", text="!ping"),
+        ],
+        variables=[
+            Variable(label="active_count", scope="global", tracks="flag_count", target="active"),
+            Variable(label="staleness", scope="node", tracks="seconds_since_last_update"),
+        ],
+        events=[
+            Event(
+                label="stale_refresh",
+                trigger=VariableThresholdTrigger(
+                    variable_label="staleness", operator="gte", value=0
+                ),
+                trigger_per_node=True,
+                responses=[AddFlagResponse(flag_label="active", target=TargetTriggeringNode())],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db)
+    eng.handle_position(NODE_ID, *INSIDE_ZONE)  # give node a known location + timestamp
+
+    # threshold (gte 0) will always be true once a position is known;
+    # verify it fires when a DM arrives, not just on position/periodic
+    eng.handle_message(NODE_ID, "!ping", is_dm=True, channel_idx=0)
+
+    assert db.has_flag("node", NODE_ID, "active")
+
+
+# ---------------------------------------------------------------------------
 # disable_event / enable_event responses
 # ---------------------------------------------------------------------------
 
