@@ -200,6 +200,12 @@ class Engine:
             if isinstance(event.trigger, CommandTrigger):
                 if self._should_fire(event, ctx):
                     self._fire_event(event, ctx)
+        for event in self.config.events:
+            if isinstance(event.trigger, VariableThresholdTrigger):
+                var_def = self._mutable_var_defs.get(event.trigger.variable_label)
+                if var_def is not None and var_def.scope == "node":
+                    if self._should_fire(event, ctx):
+                        self._fire_event(event, ctx)
 
     def handle_periodic(self) -> None:
         expired_flags = self.state.expire_flags()

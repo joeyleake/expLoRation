@@ -239,6 +239,50 @@ def test_variable_threshold_computed_fires(db):
     assert db.has_flag("node", NODE2_ID, "scored")
 
 
+def test_variable_threshold_node_mutable_fires_on_dm(db):
+    """A node-scoped mutable variable_threshold fires on the same DM that crosses it,
+    not deferred to the next position update (e.g. veteran/expert promotion)."""
+    from config import Message, MutableVariableDef
+    cfg = minimal_config(
+        messages=[
+            Message(label="hello", text="Hello world"),
+            Message(label="greet_node", text="Hi {node_id}"),
+            Message(label="greet_zone", text="Zone: {zone}"),
+            Message(label="ping", text="!ping"),
+        ],
+        mutable_variables=[
+            MutableVariableDef(label="score", type="integer", scope="global", initial=0),
+            MutableVariableDef(label="uses", type="integer", scope="node", initial=0),
+        ],
+        events=[
+            Event(
+                label="count_ev",
+                trigger=CommandTrigger(kind="dm", message_label="ping"),
+                responses=[IncrementVariableResponse(
+                    variable_label="uses", amount=1,
+                    target=TargetTriggeringNode(),
+                )],
+            ),
+            Event(
+                label="promote_ev",
+                trigger=VariableThresholdTrigger(variable_label="uses", operator="gte", value=3),
+                trigger_per_node=True,
+                max_triggers=1,
+                responses=[AddFlagResponse(flag_label="active", target=TargetTriggeringNode())],
+            ),
+        ],
+    )
+    eng = make_engine(cfg, db)
+    db.init_mutable_variables(cfg)
+
+    eng.handle_message(NODE_ID, "!ping", is_dm=True, channel_idx=0)
+    eng.handle_message(NODE_ID, "!ping", is_dm=True, channel_idx=0)
+    assert not db.has_flag("node", NODE_ID, "active")  # 2 uses — not yet
+
+    eng.handle_message(NODE_ID, "!ping", is_dm=True, channel_idx=0)
+    assert db.has_flag("node", NODE_ID, "active")  # 3rd DM triggers promotion immediately
+
+
 # ---------------------------------------------------------------------------
 # Responses: send_message
 # ---------------------------------------------------------------------------
@@ -765,12 +809,12 @@ def test_variable_threshold_skips_when_distance_change_unknown(db):
 
 
 # ---------------------------------------------------------------------------
-# variable_threshold fires during handle_message for node-scoped computed vars
+# variable_threshold during handle_message: mutable node-scoped only
 # ---------------------------------------------------------------------------
 
 def test_variable_threshold_fires_on_dm_for_computed_node_var(db):
-    """A variable_threshold on a node-scoped computed variable evaluates at DM
-    receipt time, enabling patterns like the stale-location refresh."""
+    """A variable_threshold on a node-scoped computed variable fires on position
+    update. The flag is set by handle_position, not handle_message."""
     from config import Variable, Message, RequestLocationResponse
     cfg = minimal_config(
         messages=[
@@ -795,13 +839,107 @@ def test_variable_threshold_fires_on_dm_for_computed_node_var(db):
         ],
     )
     eng = make_engine(cfg, db)
-    eng.handle_position(NODE_ID, *INSIDE_ZONE)  # give node a known location + timestamp
-
-    # threshold (gte 0) will always be true once a position is known;
-    # verify it fires when a DM arrives, not just on position/periodic
-    eng.handle_message(NODE_ID, "!ping", is_dm=True, channel_idx=0)
-
+    eng.handle_position(NODE_ID, *INSIDE_ZONE)  # threshold fires here (staleness >= 0 always true)
     assert db.has_flag("node", NODE_ID, "active")
+
+
+def test_computed_threshold_does_not_refire_in_handle_message(db):
+    """Computed variable thresholds (e.g. direction flags) must not re-fire during
+    handle_message — only mutable node-scoped thresholds run there."""
+    from config import Variable
+    cfg = minimal_config(
+        variables=[
+            Variable(label="active_count", scope="global", tracks="flag_count", target="active"),
+            Variable(label="delta", scope="node", tracks="distance_change_to_waypoint", target="wp_a"),
+        ],
+        events=[
+            Event(
+                label="closer_ev",
+                trigger=VariableThresholdTrigger(variable_label="delta", operator="lt", value=0),
+                responses=[AddFlagResponse(flag_label="active", target=TargetTriggeringNode())],
+            ),
+            Event(
+                label="ping_ev",
+                trigger=CommandTrigger(kind="dm", message_label="hello"),
+                responses=[RemoveFlagResponse(flag_label="active", target=TargetTriggeringNode())],
+            ),
+        ],
+    )
+    eng = make_engine(cfg, db)
+    # Move closer to wp_a so delta < 0 — closer_ev fires and sets active
+    eng.handle_position(NODE_ID, 47.020, -122.020)  # far
+    eng.handle_position(NODE_ID, *INSIDE_ZONE)       # closer — active set
+    assert db.has_flag("node", NODE_ID, "active")
+
+    # DM clears the flag; if computed threshold re-ran in handle_message it would re-set it
+    eng.handle_message(NODE_ID, "Hello world", is_dm=True, channel_idx=0)
+    assert not db.has_flag("node", NODE_ID, "active")  # stays cleared — threshold did not refire
+
+
+def test_direction_flag_cleared_after_hint(db):
+    """dir_closer and dir_farther are removed when a hint response fires,
+    so a repeat !hint without new movement returns hint_same."""
+    from config import Variable, Message, MutableVariableDef
+    cfg = minimal_config(
+        messages=[
+            Message(label="hello", text="Hello world"),
+            Message(label="greet_node", text="Hi {node_id}"),
+            Message(label="greet_zone", text="Zone: {zone}"),
+            Message(label="hint_cmd", text="!hint"),
+            Message(label="warmer_msg", text="warmer"),
+            Message(label="same_msg", text="same"),
+        ],
+        flags=[
+            *[f for f in minimal_config().flags],  # active, scored
+            __import__('config').FlagDef(label="dir_closer"),
+            __import__('config').FlagDef(label="dir_farther"),
+        ],
+        mutable_variables=[
+            MutableVariableDef(label="score", type="integer", scope="global", initial=0),
+        ],
+        variables=[
+            Variable(label="active_count", scope="global", tracks="flag_count", target="active"),
+        ],
+        events=[
+            Event(
+                label="hint_warmer",
+                trigger=CommandTrigger(kind="dm", message_label="hint_cmd"),
+                trigger_per_node=True,
+                exceptions=[
+                    __import__('config').EventException(kind="node_lacks_flag", flag="dir_closer"),
+                ],
+                responses=[
+                    SendMessageResponse(message_label="warmer_msg", target=TargetTriggeringNode()),
+                    RemoveFlagResponse(flag_label="dir_closer", target=TargetTriggeringNode()),
+                    RemoveFlagResponse(flag_label="dir_farther", target=TargetTriggeringNode()),
+                ],
+            ),
+            Event(
+                label="hint_same",
+                trigger=CommandTrigger(kind="dm", message_label="hint_cmd"),
+                trigger_per_node=True,
+                exceptions=[
+                    __import__('config').EventException(kind="node_has_flag", flag="dir_closer"),
+                    __import__('config').EventException(kind="node_has_flag", flag="dir_farther"),
+                ],
+                responses=[
+                    SendMessageResponse(message_label="same_msg", target=TargetTriggeringNode()),
+                ],
+            ),
+        ],
+    )
+    eng = make_engine(cfg, db)
+    db.add_flag("node", NODE_ID, "dir_closer")
+
+    # First hint: warmer fires, clears direction flags
+    eng.handle_message(NODE_ID, "!hint", is_dm=True, channel_idx=0)
+    assert eng.sent_dms[0][1] == "warmer"
+    assert not db.has_flag("node", NODE_ID, "dir_closer")
+    assert not db.has_flag("node", NODE_ID, "dir_farther")
+
+    # Second hint without movement: same fires (no direction flags)
+    eng.handle_message(NODE_ID, "!hint", is_dm=True, channel_idx=0)
+    assert eng.sent_dms[1][1] == "same"
 
 
 # ---------------------------------------------------------------------------
