@@ -37,7 +37,7 @@ waypoints:
 
 nodes:
   - label: debug_node
-    node_id: "!043906b8"        # Eelshop
+    node_id: "!0123456a"        # CONFIGURE
     initial_flags:
       - is_debug_node
 
