@@ -93,6 +93,34 @@ Generate a complete, runnable YAML file. Follow these rules:
 - Use `{node_id}` for the raw hex ID, `{node_shortname}` for the 4-char callsign, or `{node_longname}` for the full display name when naming the triggering node in announcements; prefer shortname/longname for player-facing messages
 - Use `{zone}` to name the zone in messages where it adds context
 
+**Templated commands (variable capture):**
+
+Place exactly one `{mutable_variable_label}` token in a `dm` or `channel` message
+text to turn it into a capture command. Everything before the token is the fixed
+prefix; everything after is the fixed suffix. The captured text is stored in the
+named variable for the triggering node before responses fire.
+
+```yaml
+- label: player_name
+  type: string
+  scope: node      # must be scope: node
+  initial: "unknown"
+  max_length: 32   # apply max_length on string vars used in broadcasts
+
+messages:
+  - label: setname_cmd
+    text: "!setname {player_name}"
+```
+
+**Security considerations for captured values:**
+- Captured values come from untrusted radio nodes — treat them like user input.
+- Captured values are stored as **literals** and are never re-interpolated. A player
+  who sends `!setname {node_id}` stores the text `{node_id}`, not their real ID.
+- Apply `max_length` on any string variable used in broadcast messages to prevent
+  a malicious player from flooding the channel with long text.
+- Prefer `type: integer` or `type: float` with `min`/`max` bounds for numeric inputs:
+  type mismatch blocks the trigger automatically, no extra validation needed.
+
 **Common patterns to apply correctly:**
 
 *Warmer/colder direction tracking:*
@@ -420,6 +448,7 @@ Before outputting any YAML, mentally verify:
 - [ ] `set_variable`/`increment_variable` on `scope: node` variables have a target; `scope: global` have no target
 - [ ] `variable_threshold` `operator` is one of: `lt`, `lte`, `eq`, `neq`, `gte`, `gt`
 - [ ] `flag_expired` has `target_kind`; `waypoint_expired` does not require it
+- [ ] Capture templates (`{mutable_var}` in command messages): at most one capture token per message; variable must be `scope: node`; `max_length` set on string vars that appear in broadcast messages
 - [ ] No real-world coordinates, node IDs, or personally-identifying information
 
 ## Reference examples

@@ -1628,3 +1628,212 @@ def test_command_zone_group_no_fire_outside(db):
     eng.handle_position(NODE_ID, *OUTSIDE_ZONE)
     eng.handle_message(NODE_ID, "hello", is_dm=True, channel_idx=0)
     assert not db.has_flag("node", NODE_ID, "active")
+
+
+# ---------------------------------------------------------------------------
+# Templated commands (variable capture)
+# ---------------------------------------------------------------------------
+
+def _make_capture_config(var_type="string", var_max=None, var_max_length=None,
+                          cmd_text="!setname {player_name}", response_msg_text=None,
+                          var_label="player_name", initial=None):
+    from config import Message, MutableVariableDef, FlagDef
+    if initial is None:
+        initial = 0 if var_type in ("integer", "float") else "unknown"
+    mv = MutableVariableDef(
+        label=var_label, type=var_type, scope="node", initial=initial,
+        max=var_max, max_length=var_max_length,
+    )
+    msgs = [Message(label="cmd", text=cmd_text)]
+    if response_msg_text is not None:
+        msgs.append(Message(label="resp", text=response_msg_text))
+    responses = []
+    if response_msg_text is not None:
+        responses.append(SendMessageResponse(message_label="resp", target=TargetTriggeringNode()))
+    responses.append(AddFlagResponse(flag_label="active", target=TargetTriggeringNode()))
+    return minimal_config(
+        messages=msgs,
+        mutable_variables=[mv],
+        flags=[FlagDef(label="active")],
+        events=[
+            Event(
+                label="capture_event",
+                trigger=CommandTrigger(kind="dm", message_label="cmd"),
+                responses=responses,
+            )
+        ],
+    )
+
+
+def test_capture_stores_string(db):
+    cfg = _make_capture_config(var_type="string", cmd_text="!setname {player_name}")
+    eng = make_engine(cfg, db)
+    eng.handle_message(NODE_ID, "!setname Joey", is_dm=True, channel_idx=0)
+    assert db.get_mutable_variable("player_name", NODE_ID) == "Joey"
+    assert db.has_flag("node", NODE_ID, "active")
+
+
+def test_capture_stores_integer(db):
+    cfg = _make_capture_config(var_type="integer", var_label="player_score",
+                                cmd_text="!setscore {player_score}", initial=0)
+    eng = make_engine(cfg, db)
+    eng.handle_message(NODE_ID, "!setscore 42", is_dm=True, channel_idx=0)
+    assert db.get_mutable_variable("player_score", NODE_ID) == 42
+
+
+def test_capture_stores_integer_into_float(db):
+    cfg = _make_capture_config(var_type="float", var_label="player_score",
+                                cmd_text="!setscore {player_score}", initial=0.0)
+    eng = make_engine(cfg, db)
+    eng.handle_message(NODE_ID, "!setscore 42", is_dm=True, channel_idx=0)
+    assert db.get_mutable_variable("player_score", NODE_ID) == 42.0
+
+
+def test_capture_stores_float(db):
+    cfg = _make_capture_config(var_type="float", var_label="player_score",
+                                cmd_text="!setscore {player_score}", initial=0.0)
+    eng = make_engine(cfg, db)
+    eng.handle_message(NODE_ID, "!setscore 3.14", is_dm=True, channel_idx=0)
+    assert abs(db.get_mutable_variable("player_score", NODE_ID) - 3.14) < 1e-9
+
+
+def test_capture_wrong_type_does_not_fire(db):
+    cfg = _make_capture_config(var_type="integer", var_label="player_score",
+                                cmd_text="!setscore {player_score}", initial=0)
+    eng = make_engine(cfg, db)
+    eng.handle_message(NODE_ID, "!setscore abc", is_dm=True, channel_idx=0)
+    assert not db.has_flag("node", NODE_ID, "active")
+    assert db.get_mutable_variable("player_score", NODE_ID) is None
+
+
+def test_capture_empty_does_not_fire(db):
+    cfg = _make_capture_config(var_type="string", cmd_text="!setname {player_name}")
+    eng = make_engine(cfg, db)
+    eng.handle_message(NODE_ID, "!setname ", is_dm=True, channel_idx=0)
+    assert not db.has_flag("node", NODE_ID, "active")
+
+
+def test_capture_clamps_to_max(db):
+    cfg = _make_capture_config(var_type="integer", var_label="player_score",
+                                cmd_text="!setscore {player_score}", var_max=10, initial=0)
+    eng = make_engine(cfg, db)
+    eng.handle_message(NODE_ID, "!setscore 999", is_dm=True, channel_idx=0)
+    assert db.get_mutable_variable("player_score", NODE_ID) == 10
+
+
+def test_capture_max_length_blocks(db):
+    cfg = _make_capture_config(var_type="string", cmd_text="!setname {player_name}",
+                                var_max_length=5)
+    eng = make_engine(cfg, db)
+    eng.handle_message(NODE_ID, "!setname TooLongName", is_dm=True, channel_idx=0)
+    assert not db.has_flag("node", NODE_ID, "active")
+
+
+def test_capture_respects_suffix(db):
+    cfg = _make_capture_config(var_type="integer", var_label="player_score",
+                                cmd_text="!rate {player_score} stars", initial=0)
+    eng = make_engine(cfg, db)
+    eng.handle_message(NODE_ID, "!rate 5 stars", is_dm=True, channel_idx=0)
+    assert db.get_mutable_variable("player_score", NODE_ID) == 5
+
+
+def test_non_capture_exact_match_unchanged(db):
+    from config import Message, FlagDef
+    cfg = minimal_config(
+        messages=[Message(label="greet", text="hello")],
+        flags=[FlagDef(label="active")],
+        events=[
+            Event(
+                label="exact_match",
+                trigger=CommandTrigger(kind="dm", message_label="greet"),
+                responses=[AddFlagResponse(flag_label="active", target=TargetTriggeringNode())],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db)
+    eng.handle_message(NODE_ID, "hello world", is_dm=True, channel_idx=0)
+    assert not db.has_flag("node", NODE_ID, "active")
+    eng.handle_message(NODE_ID, "hello", is_dm=True, channel_idx=0)
+    assert db.has_flag("node", NODE_ID, "active")
+
+
+def test_capture_variable_available_in_response_message(db):
+    cfg = _make_capture_config(
+        var_type="string", cmd_text="!setname {player_name}",
+        response_msg_text="Name set to: {player_name}",
+    )
+    eng = make_engine(cfg, db)
+    eng.handle_message(NODE_ID, "!setname Joey", is_dm=True, channel_idx=0)
+    assert any("Joey" in text for _, text in eng.sent_dms)
+
+
+# ---------------------------------------------------------------------------
+# Capture injection / security tests
+# ---------------------------------------------------------------------------
+
+def test_capture_template_injection_is_literal(db):
+    cfg = _make_capture_config(
+        var_type="string", cmd_text="!setname {player_name}",
+        response_msg_text="Name: {player_name}",
+    )
+    eng = make_engine(cfg, db)
+    # Player tries to inject a token — should be stored and echoed as literal text
+    eng.handle_message(NODE_ID, "!setname {node_id}", is_dm=True, channel_idx=0)
+    stored = db.get_mutable_variable("player_name", NODE_ID)
+    assert stored == "{node_id}"
+    # The response message should contain the literal braces, not the resolved node ID
+    assert any("{node_id}" in text and NODE_ID not in text for _, text in eng.sent_dms)
+
+
+def test_capture_hard_length_cap(db):
+    cfg = _make_capture_config(var_type="string", cmd_text="!setname {player_name}")
+    eng = make_engine(cfg, db)
+    long_name = "A" * 201
+    eng.handle_message(NODE_ID, f"!setname {long_name}", is_dm=True, channel_idx=0)
+    assert not db.has_flag("node", NODE_ID, "active")
+
+
+def test_capture_strips_surrounding_whitespace(db):
+    cfg = _make_capture_config(var_type="string", cmd_text="!setname {player_name}")
+    eng = make_engine(cfg, db)
+    eng.handle_message(NODE_ID, "!setname   Joey  ", is_dm=True, channel_idx=0)
+    stored = db.get_mutable_variable("player_name", NODE_ID)
+    assert stored == "Joey"
+
+
+def test_capture_sql_chars_stored_safely(db):
+    cfg = _make_capture_config(var_type="string", cmd_text="!setname {player_name}")
+    eng = make_engine(cfg, db)
+    dangerous = "'; DROP TABLE--"
+    eng.handle_message(NODE_ID, f"!setname {dangerous}", is_dm=True, channel_idx=0)
+    stored = db.get_mutable_variable("player_name", NODE_ID)
+    assert stored == dangerous
+
+
+def test_empty_initial_string_falls_back_to_node_id(db):
+    # initial: "" on a node-scoped string variable resolves to node_id in messages
+    from config import Message, MutableVariableDef, FlagDef
+    cfg = minimal_config(
+        messages=[
+            Message(label="announce", text="Winner: {player_name}"),
+            Message(label="cmd", text="!win"),
+        ],
+        mutable_variables=[
+            MutableVariableDef(label="player_name", type="string", scope="node", initial=""),
+        ],
+        flags=[FlagDef(label="active")],
+        events=[
+            Event(
+                label="win",
+                trigger=CommandTrigger(kind="dm", message_label="cmd"),
+                responses=[
+                    SendMessageResponse(message_label="announce", target=TargetTriggeringNode()),
+                    AddFlagResponse(flag_label="active", target=TargetTriggeringNode()),
+                ],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db)
+    eng.handle_message(NODE_ID, "!win", is_dm=True, channel_idx=0)
+    # player_name was never set — should fall back to node_id in the message
+    assert any(NODE_ID in text for _, text in eng.sent_dms)

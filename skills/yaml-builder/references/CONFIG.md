@@ -554,6 +554,12 @@ mutable_variables:
     type: integer
     scope: node     # tracked independently per node
     initial: 0
+
+  - label: player_name
+    type: string
+    scope: node
+    initial: "unknown"
+    max_length: 32  # optional — limits capture length; hard cap of 200 always applies
 ```
 
 | Field | Type | Required | Description |
@@ -564,6 +570,7 @@ mutable_variables:
 | `initial` | int/float/string | yes | Starting value. Must match `type`. |
 | `min` | number | no | Clamp floor for integer/float. Ignored for string. |
 | `max` | number | no | Clamp ceiling for integer/float. Ignored for string. |
+| `max_length` | integer | no | Maximum character length for `type: string`. Applies to captured values from templated commands. A hard cap of 200 characters always applies regardless of this setting. |
 
 **Notes:**
 - `min` and `max` are enforced by `set_variable` and `increment_variable` at
@@ -892,6 +899,59 @@ trigger:
 | `zone_label` | no | A `zones` label — if set, sender must be inside this zone. Mutually exclusive with `zone_group`. |
 | `zone_group` | no | A `groups` label of kind `zone` — sender must be inside any member zone. Mutually exclusive with `zone_label`. |
 | `channel_label` | yes | A `channels` label — message must arrive on this channel |
+
+#### Templated commands (variable capture)
+
+A `dm` or `channel` trigger's message text may contain exactly one
+`{mutable_variable_label}` token. When an incoming message matches the prefix and
+suffix surrounding that token, the captured text is stored in the named variable
+for the triggering node — before any responses fire, so response messages that
+interpolate the same variable see the new value immediately.
+
+```yaml
+mutable_variables:
+  - label: player_name
+    type: string
+    scope: node       # must be scope: node — capture is always per-node
+    initial: "unknown"
+    max_length: 32    # optional — rejects captures longer than this
+
+messages:
+  - label: setname_cmd
+    text: "!setname {player_name}"    # {player_name} is the capture slot
+  - label: name_confirmed
+    text: "Name set to: {player_name}"
+
+events:
+  - label: set_name
+    trigger:
+      type: dm
+      message_label: setname_cmd
+    responses:
+      - type: send_message
+        message_label: name_confirmed
+        to_triggering_node: true
+```
+
+A player DMs `!setname Joey` and the bot replies `Name set to: Joey`.
+
+**Rules:**
+- Exactly one `{mutable_variable_label}` token per command message. More than one is a config error.
+- The variable must be `scope: node`. Global-scoped variables cannot be captured.
+- Everything before the token is the fixed prefix; everything after is the fixed suffix.
+- Empty captures do not fire the event.
+- Captures longer than 200 characters (hard cap) never fire regardless of `max_length`.
+- Type mismatches block the trigger: `!setscore abc` won't fire if the variable is `type: integer`.
+- Integer values (`42`) are accepted for `type: float` variables.
+- Leading and trailing whitespace in the captured value is stripped.
+
+> **Security note:** Captured values come from untrusted radio nodes. They are stored
+> as literals and are never re-interpolated — a player who sends `!setname {node_id}`
+> stores the literal string `{node_id}`, which is echoed as-is in response messages.
+> Apply `max_length` on string variables that appear in broadcast messages to limit
+> how much text an adversarial player can inject into channel announcements.
+> Prefer `type: integer` or `type: float` with `min`/`max` bounds for numeric inputs:
+> type mismatch blocks the trigger automatically.
 
 #### `variable_threshold` — a variable crosses a threshold
 

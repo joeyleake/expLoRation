@@ -71,6 +71,7 @@ class MutableVariableDef:
     initial: int | float | str
     min: int | float | None = None
     max: int | float | None = None
+    max_length: int | None = None  # string type only; hard cap of 200 always applies
 
 
 @dataclass
@@ -720,6 +721,11 @@ def _validate(cfg: GameConfig) -> None:
             raise ConfigError(f"{mvctx}: scope must be one of {_MV_SCOPES}")
         if mv.type == "string" and (mv.min is not None or mv.max is not None):
             raise ConfigError(f"{mvctx}: min/max not valid for string type")
+        if mv.max_length is not None:
+            if mv.type != "string":
+                raise ConfigError(f"{mvctx}: max_length only valid for type: string")
+            if not isinstance(mv.max_length, int) or isinstance(mv.max_length, bool) or mv.max_length < 1:
+                raise ConfigError(f"{mvctx}: max_length must be a positive integer")
         if mv.type == "integer" and (not isinstance(mv.initial, int) or isinstance(mv.initial, bool)):
             raise ConfigError(f"{mvctx}: initial must be an integer")
         elif mv.type == "float" and (not isinstance(mv.initial, (int, float)) or isinstance(mv.initial, bool)):
@@ -967,13 +973,35 @@ def _validate(cfg: GameConfig) -> None:
             raise ConfigError(f"{vctx}: unknown tracks value {var.tracks!r}")
 
     all_variable_labels = variable_labels | mutable_var_labels
-    _BUILTIN_TOKENS = frozenset({"node_id", "zone"})
+    _BUILTIN_TOKENS = frozenset({"node_id", "node_shortname", "node_longname", "zone"})
     _VAR_TOKEN_RE = re.compile(r'\{(\w+)\}')
     for msg in cfg.messages:
         for token in _VAR_TOKEN_RE.findall(msg.text):
             if token not in all_variable_labels and token not in _BUILTIN_TOKENS:
                 raise ConfigError(
                     f"Message {msg.label!r}: interpolation token '{{{token}}}' not defined in variables"
+                )
+
+    # Validate capture templates: CommandTrigger messages with mutable variable tokens
+    _cmd_events = [e for e in cfg.events if isinstance(e.trigger, CommandTrigger)]
+    for event in _cmd_events:
+        t = event.trigger
+        msg = next((m for m in cfg.messages if m.label == t.message_label), None)
+        if msg is None:
+            continue
+        tokens = _VAR_TOKEN_RE.findall(msg.text)
+        capture_vars = [tok for tok in tokens if tok in mutable_var_def_map and tok not in _BUILTIN_TOKENS]
+        if len(capture_vars) > 1:
+            raise ConfigError(
+                f"Event {event.label!r}: command message {msg.label!r} has more than one "
+                f"capture variable ({capture_vars!r}); only one allowed per command"
+            )
+        if len(capture_vars) == 1:
+            var_def = mutable_var_def_map[capture_vars[0]]
+            if var_def.scope != "node":
+                raise ConfigError(
+                    f"Event {event.label!r}: capture variable {capture_vars[0]!r} "
+                    f"must be scope: node"
                 )
 
 
@@ -1081,6 +1109,7 @@ def load_config(path: str) -> GameConfig:
                 initial=mv["initial"],
                 min=mv.get("min"),
                 max=mv.get("max"),
+                max_length=mv.get("max_length"),
             )
             for mv in raw.get("mutable_variables", [])
         ],

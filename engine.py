@@ -34,6 +34,36 @@ log = logging.getLogger(__name__)
 
 _MAX_MSG_BYTES = 200
 _VAR_RE = re.compile(r'\{(\w+)\}')
+_BUILTIN_TOKENS = frozenset({"node_id", "node_shortname", "node_longname", "zone"})
+_CAPTURE_HARD_CAP = 200
+
+
+def _find_capture_var(template: str, mutable_var_defs: dict) -> str | None:
+    tokens = _VAR_RE.findall(template)
+    captures = [t for t in tokens if t in mutable_var_defs and t not in _BUILTIN_TOKENS]
+    return captures[0] if len(captures) == 1 else None
+
+
+def _split_capture_pattern(template: str, var_label: str) -> tuple[str, str]:
+    token = f"{{{var_label}}}"
+    idx = template.index(token)
+    return template[:idx].rstrip(), template[idx + len(token):].lstrip()
+
+
+def _can_coerce_capture(var_type: str, value: str) -> bool:
+    if var_type == "integer":
+        try:
+            int(value)
+            return True
+        except ValueError:
+            return False
+    if var_type == "float":
+        try:
+            float(value)
+            return True
+        except ValueError:
+            return False
+    return True
 
 
 def _split_message(text: str) -> list[str]:
@@ -199,6 +229,7 @@ class Engine:
         for event in self.config.events:
             if isinstance(event.trigger, CommandTrigger):
                 if self._should_fire(event, ctx):
+                    self._apply_command_capture(event, ctx)
                     self._fire_event(event, ctx)
         for event in self.config.events:
             if isinstance(event.trigger, VariableThresholdTrigger):
@@ -400,8 +431,31 @@ class Engine:
             message = self._get_message(t.message_label)
             if message is None:
                 return False
-            if ctx.text.strip() != message.text.strip():
-                return False
+            var_label = _find_capture_var(message.text, self._mutable_var_defs)
+            if var_label is None:
+                if ctx.text.strip() != message.text.strip():
+                    return False
+            else:
+                prefix, suffix = _split_capture_pattern(message.text, var_label)
+                incoming = ctx.text.strip()
+                if not incoming.startswith(prefix):
+                    return False
+                remainder = incoming[len(prefix):].lstrip()
+                if suffix:
+                    if not remainder.endswith(suffix):
+                        return False
+                    captured = remainder[: len(remainder) - len(suffix)].rstrip()
+                else:
+                    captured = remainder
+                if not captured:
+                    return False
+                if len(captured) > _CAPTURE_HARD_CAP:
+                    return False
+                var_def = self._mutable_var_defs[var_label]
+                if var_def.max_length is not None and len(captured) > var_def.max_length:
+                    return False
+                if not _can_coerce_capture(var_def.type, captured):
+                    return False
             if t.kind == "dm" and not ctx.is_dm:
                 return False
             if t.kind == "channel":
@@ -593,6 +647,31 @@ class Engine:
         ctx = PeriodicContext()
         if not self._check_exceptions(event, ctx):
             self._fire_event(event, ctx)
+
+    def _apply_command_capture(self, event: Event, ctx: MessageContext) -> None:
+        trigger = event.trigger
+        if not isinstance(trigger, CommandTrigger):
+            return
+        message = self._get_message(trigger.message_label)
+        if message is None:
+            return
+        var_label = _find_capture_var(message.text, self._mutable_var_defs)
+        if var_label is None:
+            return
+        var_def = self._mutable_var_defs[var_label]
+        prefix, suffix = _split_capture_pattern(message.text, var_label)
+        incoming = ctx.text.strip()
+        remainder = incoming[len(prefix):].lstrip()
+        captured = remainder[: len(remainder) - len(suffix)].rstrip() if suffix else remainder
+        if var_def.type == "integer":
+            value = int(captured)
+        elif var_def.type == "float":
+            value = float(captured)
+        else:
+            value = captured
+        value = self._clamp_value(var_def, value)
+        self.state.set_mutable_variable(var_def.label, value, ctx.node_id)
+        log.info("capture_command: set %r[%s] = %r", var_def.label, ctx.node_id, value)
 
     def _fire_event(self, event: Event, ctx: Context) -> None:
         log.info("Firing event %r (ctx=%s)", event.label, ctx)
@@ -1165,7 +1244,11 @@ class Engine:
             raw = self.state.get_mutable_variable(var_def.label)
         if raw is None:
             raw = var_def.initial
-        return str(raw)
+        result = str(raw)
+        # initial: "" means "use node_id as display fallback" — never show a blank name
+        if not result and var_def.scope == "node" and triggering_node_id is not None:
+            return triggering_node_id
+        return result
 
     def _get_variable(self, label: str) -> Variable | None:
         return next((v for v in self.config.variables if v.label == label), None)
