@@ -80,7 +80,10 @@ class Variable:
     scope: str            # global | node | zone | waypoint | event
     tracks: str           # static | node_count | event_trigger_count | flag_count |
                           # waypoint_node_count | distance_to_waypoint | distance_to_zone |
-                          # distance_to_node | nearest_node_distance | nearest_node_name
+                          # distance_to_node | nearest_node_distance | nearest_node_name |
+                          # node_battery_level | node_voltage | node_channel_utilization |
+                          # node_air_util_tx | node_uptime_seconds | node_snr |
+                          # node_hops_away | node_hw_model | node_role
     target: str | None = None        # zone/waypoint/event/flag label (tracks-dependent)
     value: str | None = None         # required for tracks: static
     event: str | None = None         # required for tracks: event_trigger_count
@@ -239,6 +242,12 @@ class SendMessageResponse:
 
 
 @dataclass
+class SendAlertResponse:
+    message_label: str
+    target: Target
+
+
+@dataclass
 class AddFlagResponse:
     flag_label: str
     target: Target
@@ -252,6 +261,11 @@ class RemoveFlagResponse:
 
 @dataclass
 class RequestLocationResponse:
+    target: Target
+
+
+@dataclass
+class RequestTelemetryResponse:
     target: Target
 
 
@@ -339,9 +353,11 @@ class DestroyWaypointResponse:
 
 Response = (
     SendMessageResponse
+    | SendAlertResponse
     | AddFlagResponse
     | RemoveFlagResponse
     | RequestLocationResponse
+    | RequestTelemetryResponse
     | SetEventTriggersResponse
     | DisableEventResponse
     | EnableEventResponse
@@ -452,12 +468,16 @@ def _parse_response(raw: dict) -> Response:
     kind = raw.get("type")
     if kind == "send_message":
         return SendMessageResponse(raw["message_label"], _parse_target(raw))
+    if kind == "send_alert":
+        return SendAlertResponse(raw["message_label"], _parse_target(raw))
     if kind == "add_flag":
         return AddFlagResponse(raw["flag_label"], _parse_target(raw))
     if kind == "remove_flag":
         return RemoveFlagResponse(raw["flag_label"], _parse_target(raw))
     if kind == "request_location":
         return RequestLocationResponse(_parse_target(raw))
+    if kind == "request_telemetry":
+        return RequestTelemetryResponse(_parse_target(raw))
     if kind == "set_event_triggers":
         return SetEventTriggersResponse(raw["event_label"], int(raw["value"]))
     if kind == "disable_event":
@@ -604,7 +624,7 @@ def _validate_response(
     channel_labels: set, group_labels: set,
     ctx: str,
 ) -> None:
-    if isinstance(resp, SendMessageResponse):
+    if isinstance(resp, (SendMessageResponse, SendAlertResponse)):
         _check_label(resp.message_label, message_labels, ctx)
     if isinstance(resp, (AddFlagResponse, RemoveFlagResponse)):
         _check_label(resp.flag_label, flag_labels, ctx)
@@ -962,6 +982,13 @@ def _validate(cfg: GameConfig) -> None:
                 raise ConfigError(f"{vctx} field 'node': must be a node label")
         elif var.tracks in ("seconds_since_last_update", "current_position", "prev_position"):
             pass  # no target required — computed from triggering node's location history
+        elif var.tracks in (
+            "node_battery_level", "node_voltage", "node_channel_utilization",
+            "node_air_util_tx", "node_uptime_seconds", "node_snr",
+            "node_hops_away", "node_hw_model", "node_role",
+        ):
+            if var.scope != "node":
+                raise ConfigError(f"{vctx}: tracks: {var.tracks!r} requires scope: node")
         elif var.tracks in ("nearest_node_distance", "nearest_node_name"):
             if var.scope == "zone" and (var.target is None or var.target not in zone_labels):
                 raise ConfigError(f"{vctx} field 'target': must be a zone label for scope: zone")

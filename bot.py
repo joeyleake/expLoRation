@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import threading
 import time
+import urllib.parse
 from datetime import datetime
 
 import meshtastic.serial_interface
@@ -48,6 +50,27 @@ def _coords(sub: dict) -> tuple[float, float] | None:
 # ---------------------------------------------------------------------------
 # Console display helpers
 # ---------------------------------------------------------------------------
+
+def _zone_map_url(config: GameConfig) -> str:
+    """Build a geojson.io URL with all zones and waypoints overlaid."""
+    features = []
+    for zone in config.zones:
+        coords = [[pt[1], pt[0]] for pt in zone.points]  # (lat,lon) → [lon,lat]
+        coords.append(coords[0])  # close polygon
+        features.append({
+            "type": "Feature",
+            "properties": {"name": zone.label},
+            "geometry": {"type": "Polygon", "coordinates": [coords]},
+        })
+    for wp in config.waypoints:
+        features.append({
+            "type": "Feature",
+            "properties": {"name": wp.label},
+            "geometry": {"type": "Point", "coordinates": [wp.lon, wp.lat]},
+        })
+    geojson = json.dumps({"type": "FeatureCollection", "features": features}, separators=(',', ':'))
+    return f"https://geojson.io/#data=data:application/json,{urllib.parse.quote(geojson)}"
+
 
 def _node_display(node_id: str, interface) -> str:
     """Return 'Long Name (!abcd1234)' if the node is known, else just the ID."""
@@ -302,6 +325,8 @@ def main() -> None:
         "Loaded config: %d channels, %d zones, %d waypoints, %d events",
         len(config.channels), len(config.zones), len(config.waypoints), len(config.events),
     )
+    if config.zones or config.waypoints:
+        print(f"Zone map: {_zone_map_url(config)}", flush=True)
 
     state = GameState(args.db)
     state.init_schema()

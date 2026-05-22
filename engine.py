@@ -14,8 +14,8 @@ from config import (
     GameConfig, Event, Variable, MutableVariableDef,
     ProximityTrigger, TimedTrigger, CommandTrigger, VariableThresholdTrigger,
     FlagExpiryTrigger, WaypointExpiryTrigger,
-    SendMessageResponse, AddFlagResponse, RemoveFlagResponse,
-    RequestLocationResponse, SetEventTriggersResponse,
+    SendMessageResponse, SendAlertResponse, AddFlagResponse, RemoveFlagResponse,
+    RequestLocationResponse, RequestTelemetryResponse, SetEventTriggersResponse,
     DisableEventResponse, EnableEventResponse,
     AddToGroupResponse, RemoveFromGroupResponse,
     SetVariableResponse, IncrementVariableResponse,
@@ -708,6 +708,18 @@ class Engine:
                 for nid in nodes:
                     self._send_dm(nid, text)
 
+        elif isinstance(resp, SendAlertResponse):
+            message = self._get_message(resp.message_label)
+            if message is None:
+                return
+            text = self._interpolate(message.text, node_id, zone_id)
+            if isinstance(resp.target, TargetChannel):
+                self._send_alert_channel(resp.target.channel_label, text)
+            else:
+                nodes = self._resolve_node_targets(resp.target, node_id, wp_id)
+                for nid in nodes:
+                    self._send_alert(nid, text)
+
         elif isinstance(resp, (AddFlagResponse, RemoveFlagResponse)):
             adding = isinstance(resp, AddFlagResponse)
             flag_def = self._get_flag_def(resp.flag_label)
@@ -725,6 +737,11 @@ class Engine:
             nodes = self._resolve_node_targets(resp.target, node_id, wp_id)
             for nid in nodes:
                 self._request_location(nid)
+
+        elif isinstance(resp, RequestTelemetryResponse):
+            nodes = self._resolve_node_targets(resp.target, node_id, wp_id)
+            for nid in nodes:
+                self._request_telemetry(nid)
 
         elif isinstance(resp, SetEventTriggersResponse):
             self.state.set_event_triggers(resp.event_label, resp.value)
@@ -1018,6 +1035,46 @@ class Engine:
                 log.info("DM → %s: %r", node_id, c[:60])
             self._send_queue.put(_fn)
 
+    def _send_alert(self, node_id: str, text: str) -> None:
+        if self._suppress_messages:
+            return
+        try:
+            dest = int(node_id.lstrip("!"), 16)
+        except ValueError:
+            log.warning("Invalid node_id for alert: %r", node_id)
+            return
+        from meshtastic import mesh_pb2, portnums_pb2
+        for chunk in _split_message(text):
+            def _fn(c=chunk, d=dest):
+                self.interface.sendData(
+                    c.encode("utf-8"),
+                    destinationId=d,
+                    portNum=portnums_pb2.PortNum.TEXT_MESSAGE_APP,
+                    channelIndex=0,
+                    priority=mesh_pb2.MeshPacket.Priority.ALERT,
+                )
+                log.info("Alert → %s: %r", node_id, c[:60])
+            self._send_queue.put(_fn)
+
+    def _send_alert_channel(self, channel_label: str, text: str) -> None:
+        if self._suppress_messages:
+            return
+        idx = self.channel_index_map.get(channel_label)
+        if idx is None:
+            log.warning("Channel %r not mapped to a device index", channel_label)
+            return
+        from meshtastic import mesh_pb2, portnums_pb2
+        for chunk in _split_message(text):
+            def _fn(c=chunk, i=idx):
+                self.interface.sendData(
+                    c.encode("utf-8"),
+                    portNum=portnums_pb2.PortNum.TEXT_MESSAGE_APP,
+                    channelIndex=i,
+                    priority=mesh_pb2.MeshPacket.Priority.ALERT,
+                )
+                log.info("Alert channel[%d] broadcast: %r", i, c[:60])
+            self._send_queue.put(_fn)
+
     def _send_channel(self, channel_label: str, text: str) -> None:
         if self._suppress_messages:
             return
@@ -1046,6 +1103,26 @@ class Engine:
                 wantResponse=True,
             )
             log.info("Location request → %s", node_id)
+        self._send_queue.put(_fn)
+
+    def _request_telemetry(self, node_id: str) -> None:
+        try:
+            dest = int(node_id.lstrip("!"), 16)
+        except ValueError:
+            log.warning("Invalid node_id for telemetry request: %r", node_id)
+            return
+        def _fn(d=dest):
+            from meshtastic import portnums_pb2
+            from meshtastic.protobuf import telemetry_pb2
+            r = telemetry_pb2.Telemetry()
+            r.device_metrics.CopyFrom(telemetry_pb2.DeviceMetrics())
+            self.interface.sendData(
+                data=r,
+                destinationId=d,
+                portNum=portnums_pb2.PortNum.TELEMETRY_APP,
+                wantResponse=True,
+            )
+            log.info("Telemetry request → %s", node_id)
         self._send_queue.put(_fn)
 
     # ------------------------------------------------------------------
@@ -1208,6 +1285,40 @@ class Engine:
                     return "[unknown]"
                 ref = (wp.lat, wp.lon)
             return str(round(geo.haversine(*ref, *target_loc)))
+
+        if var.tracks in (
+            "node_battery_level", "node_voltage", "node_channel_utilization",
+            "node_air_util_tx", "node_uptime_seconds", "node_snr",
+            "node_hops_away", "node_hw_model", "node_role",
+        ):
+            if triggering_node_id is None:
+                return "[no node context]"
+            node_info = (self.interface.nodes or {}).get(triggering_node_id, {})
+            if var.tracks == "node_battery_level":
+                val = node_info.get("deviceMetrics", {}).get("batteryLevel")
+                return str(val) if val is not None else "[unknown]"
+            if var.tracks == "node_voltage":
+                val = node_info.get("deviceMetrics", {}).get("voltage")
+                return f"{val:.2f}" if val is not None else "[unknown]"
+            if var.tracks == "node_channel_utilization":
+                val = node_info.get("deviceMetrics", {}).get("channelUtilization")
+                return f"{val:.1f}" if val is not None else "[unknown]"
+            if var.tracks == "node_air_util_tx":
+                val = node_info.get("deviceMetrics", {}).get("airUtilTx")
+                return f"{val:.1f}" if val is not None else "[unknown]"
+            if var.tracks == "node_uptime_seconds":
+                val = node_info.get("deviceMetrics", {}).get("uptimeSeconds")
+                return str(val) if val is not None else "[unknown]"
+            if var.tracks == "node_snr":
+                val = node_info.get("snr")
+                return f"{val:.2f}" if val is not None else "[unknown]"
+            if var.tracks == "node_hops_away":
+                val = node_info.get("hopsAway")
+                return str(val) if val is not None else "[unknown]"
+            if var.tracks == "node_hw_model":
+                return node_info.get("user", {}).get("hwModel", "[unknown]")
+            if var.tracks == "node_role":
+                return node_info.get("user", {}).get("role", "[unknown]")
 
         if var.tracks in ("nearest_node_distance", "nearest_node_name"):
             excluded = set(self.state.get_nodes_with_flag(var.exclude_flag)) if var.exclude_flag else set()

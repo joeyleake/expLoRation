@@ -533,6 +533,95 @@ Supports the same optional `exclude_flag` field.
   exclude_flag: homeowner
 ```
 
+#### `node_battery_level` — battery percentage reported by a node
+
+Returns the most recently received battery level (0–100) from the node's telemetry.
+Returns `[unknown]` if no telemetry has been received yet. Requires `scope: node`.
+
+```yaml
+- label: battery
+  scope: node
+  tracks: node_battery_level
+```
+
+#### `node_voltage` — supply voltage reported by a node
+
+Returns the node's supply voltage as a float formatted to 2 decimal places (e.g. `3.85`).
+
+```yaml
+- label: volts
+  scope: node
+  tracks: node_voltage
+```
+
+#### `node_channel_utilization` — channel utilization percentage
+
+Returns the node's reported channel utilization (%) formatted to 1 decimal place.
+
+```yaml
+- label: ch_util
+  scope: node
+  tracks: node_channel_utilization
+```
+
+#### `node_air_util_tx` — transmit air utilization percentage
+
+Returns the fraction of airtime the node is spending transmitting, formatted to 1 decimal place.
+
+```yaml
+- label: air_tx
+  scope: node
+  tracks: node_air_util_tx
+```
+
+#### `node_uptime_seconds` — seconds since the node last booted
+
+```yaml
+- label: uptime
+  scope: node
+  tracks: node_uptime_seconds
+```
+
+#### `node_snr` — signal-to-noise ratio of the last received packet
+
+Returns the SNR of the most recently received packet from this node, formatted to 2 decimal places (e.g. `7.50`). Updated on every received packet, not just telemetry.
+
+```yaml
+- label: link_snr
+  scope: node
+  tracks: node_snr
+```
+
+#### `node_hops_away` — hop count from the bot's radio to this node
+
+```yaml
+- label: hops
+  scope: node
+  tracks: node_hops_away
+```
+
+#### `node_hw_model` — hardware model string
+
+Returns the node's reported hardware model (e.g. `TBEAM`, `RAK4631`, `HELTEC_V3`).
+
+```yaml
+- label: hardware
+  scope: node
+  tracks: node_hw_model
+```
+
+#### `node_role` — configured node role
+
+Returns the node's role string (e.g. `CLIENT`, `ROUTER`, `ROUTER_CLIENT`).
+
+```yaml
+- label: role
+  scope: node
+  tracks: node_role
+```
+
+> **Note:** All `node_*` tracks read from the bot's local nodedb. Telemetry values (`node_battery_level`, `node_voltage`, `node_channel_utilization`, `node_air_util_tx`, `node_uptime_seconds`) are only as fresh as the last telemetry broadcast from that node. Use `request_telemetry` to prompt a fresh update.
+
 ---
 
 ## Mutable Variables
@@ -1062,6 +1151,25 @@ are documented in the [Targets](#targets) section below.
 | `message_label` | yes | A `messages` label. The `text` of that message is sent. |
 | target key | yes | One target key (see Targets). Use `to_channel` for a channel broadcast; all other targets send a DM to each resolved node individually. |
 
+#### `send_alert` — send a high-priority alert message
+
+Sends the message text via the Meshtastic `ALERT_APP` port with elevated priority.
+On nodes with the **External Notification** module configured (`alert_bell_buzzer: true`),
+this triggers the hardware buzzer. Client apps may also display alerts differently from
+ordinary text. Use for genuine safety or urgency situations — e.g. notifying players
+who have entered a restricted or dangerous area.
+
+```yaml
+- type: send_alert
+  message_label: danger_warning    # messages label
+  to_triggering_node: true         # target (see Targets)
+```
+
+| Field | Required | Description |
+|---|---|---|
+| `message_label` | yes | A `messages` label. The `text` is sent as an alert. |
+| target key | yes | One target key (see Targets). Use `to_channel` for a channel broadcast; all other targets send an alert DM to each resolved node individually. |
+
 #### `add_flag` — apply a flag to a target
 
 ```yaml
@@ -1095,6 +1203,21 @@ not respond depending on firmware version and settings.
 
 ```yaml
 - type: request_location
+  to_triggering_node: true
+```
+
+| Field | Required | Description |
+|---|---|---|
+| target key | yes | One target key (see Targets). Only node-resolving targets are meaningful here. |
+
+#### `request_telemetry` — ask target node(s) to broadcast device metrics
+
+Sends a best-effort telemetry request to the target node(s). On response the bot's
+nodedb is updated, so subsequent `node_battery_level`, `node_voltage`, etc. variable
+reads will reflect the fresh values.
+
+```yaml
+- type: request_telemetry
   to_triggering_node: true
 ```
 

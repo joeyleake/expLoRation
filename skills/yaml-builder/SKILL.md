@@ -112,6 +112,42 @@ messages:
     text: "!setname {player_name}"
 ```
 
+**Alerts (`send_alert`):**
+
+Use `send_alert` instead of `send_message` when the message represents a genuine
+safety or urgency situation — for example, notifying a player who has entered a
+restricted or dangerous area. Alerts are sent as `TEXT_MESSAGE_APP` with
+`Priority.ALERT`, so they appear as normal text in all clients but receive
+preferential routing through the mesh. On nodes with the External Notification
+module configured, they may also trigger hardware buzzers or vibration.
+
+```yaml
+- type: send_alert
+  message_label: danger_msg
+  to_triggering_node: true
+```
+
+**Node hardware and telemetry variables:**
+
+Nine node-scoped `tracks` values expose live data from the bot's nodedb:
+
+| `tracks` value | Returns |
+|---|---|
+| `node_battery_level` | Battery % (integer) |
+| `node_voltage` | Supply voltage (e.g. `3.85`) |
+| `node_channel_utilization` | Channel utilization % |
+| `node_air_util_tx` | TX air utilization % |
+| `node_uptime_seconds` | Seconds since last boot |
+| `node_snr` | SNR of last received packet |
+| `node_hops_away` | Hop count from bot's radio |
+| `node_hw_model` | Hardware model string (e.g. `TBEAM`) |
+| `node_role` | Node role (e.g. `CLIENT`, `ROUTER`) |
+
+All require `scope: node`. Telemetry values are only as fresh as the last
+telemetry broadcast — use `request_telemetry` to prompt a fresh update. Use
+`request_telemetry` in the same event as a `variable_threshold` or DM command
+to keep values current.
+
 **Security considerations for captured values:**
 - Captured values come from untrusted radio nodes — treat them like user input.
 - Captured values are stored as **literals** and are never re-interpolated. A player
@@ -449,6 +485,8 @@ Before outputting any YAML, mentally verify:
 - [ ] `variable_threshold` `operator` is one of: `lt`, `lte`, `eq`, `neq`, `gte`, `gt`
 - [ ] `flag_expired` has `target_kind`; `waypoint_expired` does not require it
 - [ ] Capture templates (`{mutable_var}` in command messages): at most one capture token per message; variable must be `scope: node`; `max_length` set on string vars that appear in broadcast messages
+- [ ] `send_alert` used only for genuine safety/urgency situations, not ordinary confirmations
+- [ ] `node_*` tracks variables are `scope: node`; pair with `request_telemetry` if fresh values are needed
 - [ ] No real-world coordinates, node IDs, or personally-identifying information
 
 ## Reference examples

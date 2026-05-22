@@ -4,9 +4,10 @@ from __future__ import annotations
 import pytest
 
 from config import (
-    GameConfig, Event,
+    GameConfig, Event, Variable, Message,
     ProximityTrigger, CommandTrigger, VariableThresholdTrigger,
-    SendMessageResponse, AddFlagResponse, RemoveFlagResponse,
+    SendMessageResponse, SendAlertResponse, AddFlagResponse, RemoveFlagResponse,
+    RequestLocationResponse, RequestTelemetryResponse,
     SetVariableResponse, IncrementVariableResponse,
     RandomOptionsResponse, RandomOption, WithNodeResponse,
     TargetTriggeringNode, TargetChannel, TargetFlag, TargetAllWithFlag, TargetGroup,
@@ -1837,3 +1838,159 @@ def test_empty_initial_string_falls_back_to_node_id(db):
     eng.handle_message(NODE_ID, "!win", is_dm=True, channel_idx=0)
     # player_name was never set — should fall back to node_id in the message
     assert any(NODE_ID in text for _, text in eng.sent_dms)
+
+
+# ---------------------------------------------------------------------------
+# send_alert
+# ---------------------------------------------------------------------------
+
+def test_send_alert_calls_send_alert_helper(db):
+    cfg = minimal_config(
+        messages=[Message(label="cmd", text="!alert"), Message(label="danger", text="Danger!")],
+        events=[
+            Event(
+                label="alert_ev",
+                trigger=CommandTrigger(kind="dm", message_label="cmd"),
+                responses=[SendAlertResponse(message_label="danger", target=TargetTriggeringNode())],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db)
+    sent_alerts: list[tuple[str, str]] = []
+    eng._send_alert = lambda nid, text: sent_alerts.append((nid, text))
+    eng.handle_message(NODE_ID, "!alert", is_dm=True, channel_idx=0)
+    assert sent_alerts == [(NODE_ID, "Danger!")]
+
+def test_send_alert_channel_calls_alert_channel_helper(db):
+    cfg = minimal_config(
+        messages=[Message(label="cmd", text="!alert"), Message(label="warning", text="Warning!")],
+        events=[
+            Event(
+                label="ch_alert",
+                trigger=CommandTrigger(kind="dm", message_label="cmd"),
+                responses=[SendAlertResponse(message_label="warning", target=TargetChannel(channel_label="main"))],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db, channel_map={"main": 0})
+    sent_alert_channels: list[tuple[str, str]] = []
+    eng._send_alert_channel = lambda ch, text: sent_alert_channels.append((ch, text))
+    eng.handle_message(NODE_ID, "!alert", is_dm=True, channel_idx=0)
+    assert sent_alert_channels == [("main", "Warning!")]
+
+def test_send_alert_interpolates_variables(db):
+    cfg = minimal_config(
+        messages=[Message(label="cmd", text="!alert"), Message(label="alert_msg", text="Alert for {node_id}!")],
+        events=[
+            Event(
+                label="alert_ev",
+                trigger=CommandTrigger(kind="dm", message_label="cmd"),
+                responses=[SendAlertResponse(message_label="alert_msg", target=TargetTriggeringNode())],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db)
+    sent_alerts: list[tuple[str, str]] = []
+    eng._send_alert = lambda nid, text: sent_alerts.append((nid, text))
+    eng.handle_message(NODE_ID, "!alert", is_dm=True, channel_idx=0)
+    assert any(NODE_ID in text for _, text in sent_alerts)
+
+
+# ---------------------------------------------------------------------------
+# request_telemetry
+# ---------------------------------------------------------------------------
+
+def test_request_telemetry_queues_helper(db):
+    cfg = minimal_config(
+        messages=[Message(label="cmd", text="!telem")],
+        events=[
+            Event(
+                label="telem_ev",
+                trigger=CommandTrigger(kind="dm", message_label="cmd"),
+                responses=[RequestTelemetryResponse(target=TargetTriggeringNode())],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db)
+    requested: list[str] = []
+    eng._request_telemetry = lambda nid: requested.append(nid)
+    eng.handle_message(NODE_ID, "!telem", is_dm=True, channel_idx=0)
+    assert requested == [NODE_ID]
+
+
+# ---------------------------------------------------------------------------
+# node_* computed variable tracks
+# ---------------------------------------------------------------------------
+
+def _make_node_var_config(tracks: str) -> GameConfig:
+    return minimal_config(
+        messages=[
+            Message(label="cmd", text="!report"),
+            Message(label="report", text=f"val={{node_val}}"),
+        ],
+        variables=[
+            Variable(label="active_count", scope="global", tracks="flag_count", target="active"),
+            Variable(label="node_val", scope="node", tracks=tracks),
+        ],
+        events=[
+            Event(
+                label="report_ev",
+                trigger=CommandTrigger(kind="dm", message_label="cmd"),
+                responses=[SendMessageResponse(message_label="report", target=TargetTriggeringNode())],
+            )
+        ],
+    )
+
+def _send_and_get(db, tracks: str, node_info: dict) -> str:
+    cfg = _make_node_var_config(tracks)
+    eng = make_engine(cfg, db)
+    eng.interface.nodes = {NODE_ID: node_info}
+    eng.handle_message(NODE_ID, "!report", is_dm=True, channel_idx=0)
+    return eng.sent_dms[-1][1] if eng.sent_dms else ""
+
+def test_node_battery_level(db):
+    text = _send_and_get(db, "node_battery_level", {"deviceMetrics": {"batteryLevel": 82}})
+    assert "82" in text
+
+def test_node_voltage(db):
+    text = _send_and_get(db, "node_voltage", {"deviceMetrics": {"voltage": 3.85}})
+    assert "3.85" in text
+
+def test_node_channel_utilization(db):
+    text = _send_and_get(db, "node_channel_utilization", {"deviceMetrics": {"channelUtilization": 12.5}})
+    assert "12.5" in text
+
+def test_node_air_util_tx(db):
+    text = _send_and_get(db, "node_air_util_tx", {"deviceMetrics": {"airUtilTx": 4.2}})
+    assert "4.2" in text
+
+def test_node_uptime_seconds(db):
+    text = _send_and_get(db, "node_uptime_seconds", {"deviceMetrics": {"uptimeSeconds": 3600}})
+    assert "3600" in text
+
+def test_node_snr(db):
+    text = _send_and_get(db, "node_snr", {"snr": 7.5})
+    assert "7.50" in text
+
+def test_node_hops_away(db):
+    text = _send_and_get(db, "node_hops_away", {"hopsAway": 2})
+    assert "2" in text
+
+def test_node_hw_model(db):
+    text = _send_and_get(db, "node_hw_model", {"user": {"hwModel": "TBEAM"}})
+    assert "TBEAM" in text
+
+def test_node_role(db):
+    text = _send_and_get(db, "node_role", {"user": {"role": "ROUTER"}})
+    assert "ROUTER" in text
+
+def test_node_var_unknown_when_no_telemetry(db):
+    text = _send_and_get(db, "node_battery_level", {})
+    assert "[unknown]" in text
+
+def test_node_var_unknown_when_node_not_in_nodedb(db):
+    cfg = _make_node_var_config("node_battery_level")
+    eng = make_engine(cfg, db)
+    eng.interface.nodes = {}
+    eng.handle_message(NODE_ID, "!report", is_dm=True, channel_idx=0)
+    assert any("[unknown]" in text for _, text in eng.sent_dms)
