@@ -978,6 +978,16 @@ class Engine:
             label = m.group(1)
             if label == "node_id":
                 return triggering_node_id or "[unknown]"
+            if label == "node_shortname":
+                if triggering_node_id is None:
+                    return "[unknown]"
+                info = (self.interface.nodes or {}).get(triggering_node_id, {})
+                return info.get("user", {}).get("shortName", "").strip() or triggering_node_id
+            if label == "node_longname":
+                if triggering_node_id is None:
+                    return "[unknown]"
+                info = (self.interface.nodes or {}).get(triggering_node_id, {})
+                return info.get("user", {}).get("longName", "").strip() or triggering_node_id
             if label == "zone":
                 return triggering_zone or "[unknown]"
             var = self._get_variable(label)

@@ -147,11 +147,13 @@ messages:
 Place `{variable_label}` anywhere in a message `text` field. Tokens are replaced
 at send time with the resolved value.
 
-Two built-in tokens are always available:
+Four built-in tokens are always available:
 
 | Token | Resolves to |
 |---|---|
 | `{node_id}` | The triggering node's ID (e.g. `!aabbccdd`), or `[unknown]` if no node context |
+| `{node_shortname}` | The triggering node's shortName (e.g. `JOEY`), falling back to node ID if name is unavailable |
+| `{node_longname}` | The triggering node's longName (e.g. `Joey's Radio`), falling back to node ID if name is unavailable |
 | `{zone}` | The zone label the triggering node most recently entered or is currently in, or `[unknown]` |
 
 For user-defined variable tokens, see the [Variables](#variables) section. If

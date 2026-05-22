@@ -90,7 +90,7 @@ Generate a complete, runnable YAML file. Follow these rules:
 - For game announcements, use emoji sparingly for visual scanning
 - Multi-line messages use YAML `|` block scalar
 - Messages longer than ~180 chars will be split by the engine — design accordingly
-- Use `{node_id}` to name the triggering node in announcements
+- Use `{node_id}` for the raw hex ID, `{node_shortname}` for the 4-char callsign, or `{node_longname}` for the full display name when naming the triggering node in announcements; prefer shortname/longname for player-facing messages
 - Use `{zone}` to name the zone in messages where it adds context
 
 **Common patterns to apply correctly:**
@@ -356,7 +356,7 @@ messages:
     text: "🎉 {node_id} found the cache!"
 ```
 Use `{label}` to interpolate any defined variable (computed or mutable).
-`{node_id}` and `{zone}` are always available as built-in tokens.
+`{node_id}`, `{node_shortname}`, `{node_longname}`, and `{zone}` are always available as built-in tokens.
 Node-scoped variables resolve to the triggering node's value.
 
 **Game state anchor:**

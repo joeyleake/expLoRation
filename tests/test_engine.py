@@ -354,6 +354,72 @@ def test_zone_interpolation(db):
     assert "zone_a" in eng.sent_dms[0][1]
 
 
+def test_node_shortname_interpolation(db):
+    from config import Message
+    cfg = minimal_config(
+        messages=[Message(label="hello", text="Hello world"),
+                  Message(label="greet_node", text="Hi {node_id}"),
+                  Message(label="greet_zone", text="Zone: {zone}"),
+                  Message(label="greet_short", text="Hey {node_shortname}!")],
+        events=[
+            Event(
+                label="greet_ev",
+                trigger=ProximityTrigger(kind="enters_zone", target_label="zone_a"),
+                responses=[SendMessageResponse(message_label="greet_short", target=TargetTriggeringNode())],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db)
+    eng.interface.nodes = {NODE_ID: {"user": {"shortName": "JOEY", "longName": "Joey's Radio"}}}
+    eng.handle_position(NODE_ID, *OUTSIDE_ZONE)
+    eng.handle_position(NODE_ID, *INSIDE_ZONE)
+    assert eng.sent_dms[0][1] == "Hey JOEY!"
+
+
+def test_node_longname_interpolation(db):
+    from config import Message
+    cfg = minimal_config(
+        messages=[Message(label="hello", text="Hello world"),
+                  Message(label="greet_node", text="Hi {node_id}"),
+                  Message(label="greet_zone", text="Zone: {zone}"),
+                  Message(label="greet_long", text="Welcome, {node_longname}.")],
+        events=[
+            Event(
+                label="greet_ev",
+                trigger=ProximityTrigger(kind="enters_zone", target_label="zone_a"),
+                responses=[SendMessageResponse(message_label="greet_long", target=TargetTriggeringNode())],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db)
+    eng.interface.nodes = {NODE_ID: {"user": {"shortName": "JOEY", "longName": "Joey's Radio"}}}
+    eng.handle_position(NODE_ID, *OUTSIDE_ZONE)
+    eng.handle_position(NODE_ID, *INSIDE_ZONE)
+    assert eng.sent_dms[0][1] == "Welcome, Joey's Radio."
+
+
+def test_node_shortname_fallback_to_id(db):
+    from config import Message
+    cfg = minimal_config(
+        messages=[Message(label="hello", text="Hello world"),
+                  Message(label="greet_node", text="Hi {node_id}"),
+                  Message(label="greet_zone", text="Zone: {zone}"),
+                  Message(label="greet_short", text="Hey {node_shortname}!")],
+        events=[
+            Event(
+                label="greet_ev",
+                trigger=ProximityTrigger(kind="enters_zone", target_label="zone_a"),
+                responses=[SendMessageResponse(message_label="greet_short", target=TargetTriggeringNode())],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db)
+    eng.interface.nodes = {NODE_ID: {"user": {"shortName": "", "longName": ""}}}
+    eng.handle_position(NODE_ID, *OUTSIDE_ZONE)
+    eng.handle_position(NODE_ID, *INSIDE_ZONE)
+    assert eng.sent_dms[0][1] == f"Hey {NODE_ID}!"
+
+
 # ---------------------------------------------------------------------------
 # Exceptions
 # ---------------------------------------------------------------------------
