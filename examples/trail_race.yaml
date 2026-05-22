@@ -67,6 +67,16 @@ zones:
       - [37.7790, -122.4190]
 
 # ---------------------------------------------------------------------------
+# Groups
+# ---------------------------------------------------------------------------
+groups:
+  - label: start_corral
+    kind: zone
+    initial_members:
+      - start_corral_a
+      - start_corral_b
+
+# ---------------------------------------------------------------------------
 # Nodes — race staff
 # ---------------------------------------------------------------------------
 nodes:
@@ -173,27 +183,11 @@ events:
         to_channel: spectators
     max_triggers: 1
 
-  # Greet runners as they enter either half of the start corral
-  - label: greet_runner_a
+  # Greet runners entering either half of the start corral
+  - label: greet_runner
     trigger:
-      type: enters_zone
-      target: start_corral_a
-    trigger_per_node: true
-    responses:
-      - type: send_message
-        message_label: runner_greeting
-        to_triggering_node: true
-    exceptions:
-      - kind: node_has_flag
-        flag: marshal
-      - kind: node_has_flag
-        flag: finished
-    max_triggers: 1
-
-  - label: greet_runner_b
-    trigger:
-      type: enters_zone
-      target: start_corral_b
+      type: enters_zone_group
+      zone_group: start_corral
     trigger_per_node: true
     responses:
       - type: send_message

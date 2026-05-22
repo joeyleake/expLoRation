@@ -63,6 +63,16 @@ zones:
       - [37.7775, -122.4158]
 
 # ---------------------------------------------------------------------------
+# Groups
+# ---------------------------------------------------------------------------
+groups:
+  - label: tour_start
+    kind: zone
+    initial_members:
+      - tour_start_a
+      - tour_start_b
+
+# ---------------------------------------------------------------------------
 # Nodes — tour operators (excluded from story triggers)
 # ---------------------------------------------------------------------------
 nodes:
@@ -174,8 +184,8 @@ messages:
 events:
   - label: tour_welcome_event
     trigger:
-      type: enters_zone
-      target: tour_start_a
+      type: enters_zone_group
+      zone_group: tour_start
     trigger_per_node: true
     responses:
       - type: add_flag

@@ -95,10 +95,13 @@ class Variable:
 
 @dataclass
 class ProximityTrigger:
-    kind: str             # near_waypoint | near_zone | near_node | in_zone_on_start
+    kind: str             # near_waypoint | near_zone | near_node | in_zone_on_start |
+                          # in_zone | enters_zone | leaves_zone |
+                          # enters_zone_group | leaves_zone_group | in_zone_group | in_zone_group_on_start
     target_label: str | None = None
     target_flag: str | None = None  # near_waypoint only: match any dynamic waypoint with this flag
     meters: float | None = None  # required for near_* kinds
+    zone_group: str | None = None  # for *_zone_group trigger kinds
 
 
 @dataclass
@@ -113,6 +116,7 @@ class CommandTrigger:
     kind: str             # dm | channel
     message_label: str
     zone_label: str | None = None
+    zone_group: str | None = None   # mutually exclusive with zone_label
     channel_label: str | None = None  # required when kind == channel
 
 
@@ -503,12 +507,14 @@ def _parse_response(raw: dict) -> Response:
 
 def _parse_trigger(raw: dict):
     kind = raw.get("type")
-    if kind in ("near_waypoint", "near_zone", "near_node", "in_zone_on_start", "in_zone", "enters_zone", "leaves_zone"):
+    if kind in ("near_waypoint", "near_zone", "near_node", "in_zone_on_start", "in_zone", "enters_zone", "leaves_zone",
+                "enters_zone_group", "leaves_zone_group", "in_zone_group", "in_zone_group_on_start"):
         return ProximityTrigger(
             kind=kind,
             target_label=raw.get("target"),
             target_flag=raw.get("target_flag"),
             meters=float(raw["meters"]) if "meters" in raw else None,
+            zone_group=raw.get("zone_group"),
         )
     if kind == "time_window":
         return TimedTrigger(
@@ -520,6 +526,7 @@ def _parse_trigger(raw: dict):
             kind=kind,
             message_label=raw["message_label"],
             zone_label=raw.get("zone_label"),
+            zone_group=raw.get("zone_group"),
             channel_label=raw.get("channel_label"),
         )
     if kind == "variable_threshold":
@@ -750,17 +757,36 @@ def _validate(cfg: GameConfig) -> None:
             else:
                 if t.target_flag is not None:
                     raise ConfigError(f"{ctx} trigger: 'target_flag' is only valid on near_waypoint triggers")
-                if t.kind in ("near_zone", "in_zone_on_start", "in_zone", "enters_zone", "leaves_zone"):
+                _ZONE_GROUP_KINDS = ("enters_zone_group", "leaves_zone_group", "in_zone_group", "in_zone_group_on_start")
+                if t.kind in _ZONE_GROUP_KINDS:
+                    if t.zone_group is None:
+                        raise ConfigError(f"{ctx} trigger {t.kind!r} requires 'zone_group'")
+                    if t.target_label is not None:
+                        raise ConfigError(f"{ctx} trigger {t.kind!r}: use 'zone_group', not 'target'")
+                    _check_label(t.zone_group, group_labels, f"{ctx} trigger")
+                    if group_kind.get(t.zone_group) != "zone":
+                        raise ConfigError(f"{ctx} trigger {t.kind!r}: group {t.zone_group!r} must be kind 'zone'")
+                elif t.kind in ("near_zone", "in_zone_on_start", "in_zone", "enters_zone", "leaves_zone"):
+                    if t.zone_group is not None:
+                        raise ConfigError(f"{ctx} trigger {t.kind!r}: 'zone_group' is only valid on zone_group trigger kinds")
                     _check_label(t.target_label, zone_labels, f"{ctx} trigger")
                 elif t.kind == "near_node":
                     _check_label(t.target_label, node_labels, f"{ctx} trigger")
-            if t.kind not in ("in_zone_on_start", "in_zone", "enters_zone", "leaves_zone") and t.meters is None:
+            _NO_METERS_KINDS = ("in_zone_on_start", "in_zone", "enters_zone", "leaves_zone",
+                                "enters_zone_group", "leaves_zone_group", "in_zone_group", "in_zone_group_on_start")
+            if t.kind not in _NO_METERS_KINDS and t.meters is None:
                 raise ConfigError(f"{ctx} trigger {t.kind!r} requires 'meters'")
 
         elif isinstance(t, CommandTrigger):
             _check_label(t.message_label, message_labels, f"{ctx} trigger")
+            if t.zone_label is not None and t.zone_group is not None:
+                raise ConfigError(f"{ctx} trigger: 'zone_label' and 'zone_group' are mutually exclusive")
             if t.zone_label is not None:
                 _check_label(t.zone_label, zone_labels, f"{ctx} trigger")
+            if t.zone_group is not None:
+                _check_label(t.zone_group, group_labels, f"{ctx} trigger")
+                if group_kind.get(t.zone_group) != "zone":
+                    raise ConfigError(f"{ctx} trigger: zone_group {t.zone_group!r} must be kind 'zone'")
             if t.kind == "channel":
                 if t.channel_label is None:
                     raise ConfigError(f"{ctx} channel trigger requires 'channel_label'")

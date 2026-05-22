@@ -81,6 +81,12 @@ zones:
   longitude, which is accurate for areas under ~10 km across.
 - The zone centroid (average of all three vertices) is used when computing
   distance-to-zone in `near_zone` triggers.
+- **Covering a rectangle or other non-triangular area:** split the shape into
+  two triangles sharing a diagonal (`_a` / `_b` by convention), define both as
+  zones, then add them to a zone group. Use `enters_zone_group` /
+  `leaves_zone_group` / `in_zone_group` triggers against the group rather than
+  writing separate events per triangle. See the `groups:` section and the
+  `enters_zone_group` trigger.
 
 ---
 
@@ -752,6 +758,71 @@ trigger:
 
 **Note:** `meters` is not used for this trigger type.
 
+#### `enters_zone_group` — node enters any zone in a group
+
+Fires when a node moves into any zone that is a member of the named zone group.
+This is the group equivalent of `enters_zone` and is the preferred way to handle
+multi-triangle areas (where a single shape is split across `_a`/`_b` zones) without
+duplicating event blocks.
+
+```yaml
+trigger:
+  type: enters_zone_group
+  zone_group: game_zones    # groups label — must be kind: zone
+```
+
+| Field | Required | Description |
+|---|---|---|
+| `zone_group` | yes | A `groups` label of kind `zone` |
+
+**Note:** `target` and `zone_group` are mutually exclusive. `{zone}` in message templates resolves to the specific zone the node entered.
+
+#### `leaves_zone_group` — node leaves any zone in a group
+
+Fires when a node moves out of any zone that is a member of the named zone group.
+
+```yaml
+trigger:
+  type: leaves_zone_group
+  zone_group: game_zones
+```
+
+| Field | Required | Description |
+|---|---|---|
+| `zone_group` | yes | A `groups` label of kind `zone` |
+
+#### `in_zone_group` — node is currently inside any group zone
+
+Fires on every position update from a node if the node's current location is
+inside any member zone of the named group. Use `max_triggers` or `reset_mins`
+to avoid continuous firing.
+
+```yaml
+trigger:
+  type: in_zone_group
+  zone_group: game_zones
+```
+
+| Field | Required | Description |
+|---|---|---|
+| `zone_group` | yes | A `groups` label of kind `zone` |
+
+#### `in_zone_group_on_start` — any node is in any group zone at check time
+
+Fires during periodic checks (every 60 seconds by default) when at least one
+node with a known location is currently inside any member zone of the group.
+Group equivalent of `in_zone_on_start`.
+
+```yaml
+trigger:
+  type: in_zone_group_on_start
+  zone_group: game_zones
+```
+
+| Field | Required | Description |
+|---|---|---|
+| `zone_group` | yes | A `groups` label of kind `zone` |
+
 #### `time_window` — current time falls within a window
 
 Fires during periodic checks when the current time is between `start` and `end`
@@ -774,20 +845,24 @@ trigger:
 #### `dm` — node sends a matching DM to the bot
 
 Fires when any node sends a direct message to the bot whose text matches a
-defined message. If `zone_label` is set, the sender must also be inside that
-zone. When omitted, the trigger fires for any node regardless of location.
+defined message. If `zone_label` or `zone_group` is set, the sender must also
+be inside that zone (or any zone in the group). When omitted, the trigger fires
+for any node regardless of location.
 
 ```yaml
 trigger:
   type: dm
   message_label: hint_request    # messages label — text must match exactly
   zone_label: start_zone         # optional — restrict to senders inside this zone
+  # OR
+  zone_group: game_zones         # optional — restrict to senders inside any zone in the group
 ```
 
 | Field | Required | Description |
 |---|---|---|
 | `message_label` | yes | A `messages` label. The incoming DM text is compared to `message.text` after stripping whitespace. |
-| `zone_label` | no | A `zones` label. If set, the sender must have a known location inside this zone. Omit to allow any node to trigger. |
+| `zone_label` | no | A `zones` label. Sender must be inside this zone. Mutually exclusive with `zone_group`. |
+| `zone_group` | no | A `groups` label of kind `zone`. Sender must be inside any member zone. Mutually exclusive with `zone_label`. |
 
 **Important:** `variable_threshold` triggers also evaluate at DM receipt time
 (when a `dm` trigger event is processed, all `variable_threshold` events for
@@ -798,8 +873,8 @@ value meets a threshold, without adding logic to the DM event itself.
 #### `channel` — node sends a matching message on a monitored channel
 
 Fires when any node broadcasts a message on a specific channel whose text
-matches a defined message. If `zone_label` is set, the sender must also be
-inside that zone.
+matches a defined message. If `zone_label` or `zone_group` is set, the sender
+must also be inside that zone (or any zone in the group).
 
 ```yaml
 trigger:
@@ -812,7 +887,8 @@ trigger:
 | Field | Required | Description |
 |---|---|---|
 | `message_label` | yes | A `messages` label |
-| `zone_label` | no | A `zones` label — if set, sender must be inside this zone |
+| `zone_label` | no | A `zones` label — if set, sender must be inside this zone. Mutually exclusive with `zone_group`. |
+| `zone_group` | no | A `groups` label of kind `zone` — sender must be inside any member zone. Mutually exclusive with `zone_label`. |
 | `channel_label` | yes | A `channels` label — message must arrive on this channel |
 
 #### `variable_threshold` — a variable crosses a threshold

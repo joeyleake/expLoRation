@@ -219,7 +219,7 @@ class Engine:
                     self._fire_event(event, ctx)
             elif (
                 isinstance(event.trigger, ProximityTrigger)
-                and event.trigger.kind == "in_zone_on_start"
+                and event.trigger.kind in ("in_zone_on_start", "in_zone_group_on_start")
             ):
                 if self._should_fire(event, ctx):
                     self._fire_event(event, ctx)
@@ -330,6 +330,40 @@ class Engine:
                     return False
                 return t.target_label in ctx.left_zones
 
+            if t.kind == "enters_zone_group":
+                if not isinstance(ctx, NodeContext):
+                    return False
+                members = self.state.get_group_members(t.zone_group)
+                return bool(ctx.entered_zones & set(members))
+
+            if t.kind == "leaves_zone_group":
+                if not isinstance(ctx, NodeContext):
+                    return False
+                members = self.state.get_group_members(t.zone_group)
+                return bool(ctx.left_zones & set(members))
+
+            if t.kind == "in_zone_group":
+                if not isinstance(ctx, NodeContext):
+                    return False
+                node_loc = located.get(ctx.node_id)
+                if node_loc is None:
+                    return False
+                return any(
+                    geo.point_in_triangle(node_loc, *z.points)
+                    for lbl in self.state.get_group_members(t.zone_group)
+                    if (z := self._get_zone(lbl)) is not None
+                )
+
+            if t.kind == "in_zone_group_on_start":
+                if not isinstance(ctx, PeriodicContext):
+                    return False
+                return any(
+                    node_id
+                    for lbl in self.state.get_group_members(t.zone_group)
+                    if (z := self._get_zone(lbl)) is not None
+                    for node_id in geo.nodes_in_zone(z, located)
+                )
+
             if t.kind == "near_node":
                 if not isinstance(ctx, NodeContext):
                     return False
@@ -384,6 +418,16 @@ class Engine:
                 if node_loc is None:
                     return False
                 if not geo.point_in_triangle(node_loc, *zone.points):
+                    return False
+            if t.zone_group is not None:
+                node_loc = self.state.get_node_location(ctx.node_id)
+                if node_loc is None:
+                    return False
+                if not any(
+                    geo.point_in_triangle(node_loc, *z.points)
+                    for lbl in self.state.get_group_members(t.zone_group)
+                    if (z := self._get_zone(lbl)) is not None
+                ):
                     return False
             return True
 
