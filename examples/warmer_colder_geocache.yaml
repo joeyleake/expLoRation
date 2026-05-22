@@ -619,8 +619,7 @@ events:
       type: in_zone
       target: search_zone
     trigger_per_node: true
-    auto_recur: true
-    recur_mins: 10
+    reset_mins: 10
     responses:
       - type: request_location
         to_triggering_node: true
