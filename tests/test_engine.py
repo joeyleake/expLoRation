@@ -4,9 +4,10 @@ from __future__ import annotations
 import pytest
 
 from config import (
-    GameConfig, Event,
+    GameConfig, Event, Variable, Message,
     ProximityTrigger, CommandTrigger, VariableThresholdTrigger,
-    SendMessageResponse, AddFlagResponse, RemoveFlagResponse,
+    SendMessageResponse, SendAlertResponse, AddFlagResponse, RemoveFlagResponse,
+    RequestLocationResponse, RequestTelemetryResponse,
     SetVariableResponse, IncrementVariableResponse,
     RandomOptionsResponse, RandomOption, WithNodeResponse,
     TargetTriggeringNode, TargetChannel, TargetFlag, TargetAllWithFlag, TargetGroup,
@@ -352,6 +353,72 @@ def test_zone_interpolation(db):
     eng.handle_position(NODE_ID, *INSIDE_ZONE)
 
     assert "zone_a" in eng.sent_dms[0][1]
+
+
+def test_node_shortname_interpolation(db):
+    from config import Message
+    cfg = minimal_config(
+        messages=[Message(label="hello", text="Hello world"),
+                  Message(label="greet_node", text="Hi {node_id}"),
+                  Message(label="greet_zone", text="Zone: {zone}"),
+                  Message(label="greet_short", text="Hey {node_shortname}!")],
+        events=[
+            Event(
+                label="greet_ev",
+                trigger=ProximityTrigger(kind="enters_zone", target_label="zone_a"),
+                responses=[SendMessageResponse(message_label="greet_short", target=TargetTriggeringNode())],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db)
+    eng.interface.nodes = {NODE_ID: {"user": {"shortName": "JOEY", "longName": "Joey's Radio"}}}
+    eng.handle_position(NODE_ID, *OUTSIDE_ZONE)
+    eng.handle_position(NODE_ID, *INSIDE_ZONE)
+    assert eng.sent_dms[0][1] == "Hey JOEY!"
+
+
+def test_node_longname_interpolation(db):
+    from config import Message
+    cfg = minimal_config(
+        messages=[Message(label="hello", text="Hello world"),
+                  Message(label="greet_node", text="Hi {node_id}"),
+                  Message(label="greet_zone", text="Zone: {zone}"),
+                  Message(label="greet_long", text="Welcome, {node_longname}.")],
+        events=[
+            Event(
+                label="greet_ev",
+                trigger=ProximityTrigger(kind="enters_zone", target_label="zone_a"),
+                responses=[SendMessageResponse(message_label="greet_long", target=TargetTriggeringNode())],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db)
+    eng.interface.nodes = {NODE_ID: {"user": {"shortName": "JOEY", "longName": "Joey's Radio"}}}
+    eng.handle_position(NODE_ID, *OUTSIDE_ZONE)
+    eng.handle_position(NODE_ID, *INSIDE_ZONE)
+    assert eng.sent_dms[0][1] == "Welcome, Joey's Radio."
+
+
+def test_node_shortname_fallback_to_id(db):
+    from config import Message
+    cfg = minimal_config(
+        messages=[Message(label="hello", text="Hello world"),
+                  Message(label="greet_node", text="Hi {node_id}"),
+                  Message(label="greet_zone", text="Zone: {zone}"),
+                  Message(label="greet_short", text="Hey {node_shortname}!")],
+        events=[
+            Event(
+                label="greet_ev",
+                trigger=ProximityTrigger(kind="enters_zone", target_label="zone_a"),
+                responses=[SendMessageResponse(message_label="greet_short", target=TargetTriggeringNode())],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db)
+    eng.interface.nodes = {NODE_ID: {"user": {"shortName": "", "longName": ""}}}
+    eng.handle_position(NODE_ID, *OUTSIDE_ZONE)
+    eng.handle_position(NODE_ID, *INSIDE_ZONE)
+    assert eng.sent_dms[0][1] == f"Hey {NODE_ID}!"
 
 
 # ---------------------------------------------------------------------------
@@ -1562,3 +1629,368 @@ def test_command_zone_group_no_fire_outside(db):
     eng.handle_position(NODE_ID, *OUTSIDE_ZONE)
     eng.handle_message(NODE_ID, "hello", is_dm=True, channel_idx=0)
     assert not db.has_flag("node", NODE_ID, "active")
+
+
+# ---------------------------------------------------------------------------
+# Templated commands (variable capture)
+# ---------------------------------------------------------------------------
+
+def _make_capture_config(var_type="string", var_max=None, var_max_length=None,
+                          cmd_text="!setname {player_name}", response_msg_text=None,
+                          var_label="player_name", initial=None):
+    from config import Message, MutableVariableDef, FlagDef
+    if initial is None:
+        initial = 0 if var_type in ("integer", "float") else "unknown"
+    mv = MutableVariableDef(
+        label=var_label, type=var_type, scope="node", initial=initial,
+        max=var_max, max_length=var_max_length,
+    )
+    msgs = [Message(label="cmd", text=cmd_text)]
+    if response_msg_text is not None:
+        msgs.append(Message(label="resp", text=response_msg_text))
+    responses = []
+    if response_msg_text is not None:
+        responses.append(SendMessageResponse(message_label="resp", target=TargetTriggeringNode()))
+    responses.append(AddFlagResponse(flag_label="active", target=TargetTriggeringNode()))
+    return minimal_config(
+        messages=msgs,
+        mutable_variables=[mv],
+        flags=[FlagDef(label="active")],
+        events=[
+            Event(
+                label="capture_event",
+                trigger=CommandTrigger(kind="dm", message_label="cmd"),
+                responses=responses,
+            )
+        ],
+    )
+
+
+def test_capture_stores_string(db):
+    cfg = _make_capture_config(var_type="string", cmd_text="!setname {player_name}")
+    eng = make_engine(cfg, db)
+    eng.handle_message(NODE_ID, "!setname Joey", is_dm=True, channel_idx=0)
+    assert db.get_mutable_variable("player_name", NODE_ID) == "Joey"
+    assert db.has_flag("node", NODE_ID, "active")
+
+
+def test_capture_stores_integer(db):
+    cfg = _make_capture_config(var_type="integer", var_label="player_score",
+                                cmd_text="!setscore {player_score}", initial=0)
+    eng = make_engine(cfg, db)
+    eng.handle_message(NODE_ID, "!setscore 42", is_dm=True, channel_idx=0)
+    assert db.get_mutable_variable("player_score", NODE_ID) == 42
+
+
+def test_capture_stores_integer_into_float(db):
+    cfg = _make_capture_config(var_type="float", var_label="player_score",
+                                cmd_text="!setscore {player_score}", initial=0.0)
+    eng = make_engine(cfg, db)
+    eng.handle_message(NODE_ID, "!setscore 42", is_dm=True, channel_idx=0)
+    assert db.get_mutable_variable("player_score", NODE_ID) == 42.0
+
+
+def test_capture_stores_float(db):
+    cfg = _make_capture_config(var_type="float", var_label="player_score",
+                                cmd_text="!setscore {player_score}", initial=0.0)
+    eng = make_engine(cfg, db)
+    eng.handle_message(NODE_ID, "!setscore 3.14", is_dm=True, channel_idx=0)
+    assert abs(db.get_mutable_variable("player_score", NODE_ID) - 3.14) < 1e-9
+
+
+def test_capture_wrong_type_does_not_fire(db):
+    cfg = _make_capture_config(var_type="integer", var_label="player_score",
+                                cmd_text="!setscore {player_score}", initial=0)
+    eng = make_engine(cfg, db)
+    eng.handle_message(NODE_ID, "!setscore abc", is_dm=True, channel_idx=0)
+    assert not db.has_flag("node", NODE_ID, "active")
+    assert db.get_mutable_variable("player_score", NODE_ID) is None
+
+
+def test_capture_empty_does_not_fire(db):
+    cfg = _make_capture_config(var_type="string", cmd_text="!setname {player_name}")
+    eng = make_engine(cfg, db)
+    eng.handle_message(NODE_ID, "!setname ", is_dm=True, channel_idx=0)
+    assert not db.has_flag("node", NODE_ID, "active")
+
+
+def test_capture_clamps_to_max(db):
+    cfg = _make_capture_config(var_type="integer", var_label="player_score",
+                                cmd_text="!setscore {player_score}", var_max=10, initial=0)
+    eng = make_engine(cfg, db)
+    eng.handle_message(NODE_ID, "!setscore 999", is_dm=True, channel_idx=0)
+    assert db.get_mutable_variable("player_score", NODE_ID) == 10
+
+
+def test_capture_max_length_blocks(db):
+    cfg = _make_capture_config(var_type="string", cmd_text="!setname {player_name}",
+                                var_max_length=5)
+    eng = make_engine(cfg, db)
+    eng.handle_message(NODE_ID, "!setname TooLongName", is_dm=True, channel_idx=0)
+    assert not db.has_flag("node", NODE_ID, "active")
+
+
+def test_capture_respects_suffix(db):
+    cfg = _make_capture_config(var_type="integer", var_label="player_score",
+                                cmd_text="!rate {player_score} stars", initial=0)
+    eng = make_engine(cfg, db)
+    eng.handle_message(NODE_ID, "!rate 5 stars", is_dm=True, channel_idx=0)
+    assert db.get_mutable_variable("player_score", NODE_ID) == 5
+
+
+def test_non_capture_exact_match_unchanged(db):
+    from config import Message, FlagDef
+    cfg = minimal_config(
+        messages=[Message(label="greet", text="hello")],
+        flags=[FlagDef(label="active")],
+        events=[
+            Event(
+                label="exact_match",
+                trigger=CommandTrigger(kind="dm", message_label="greet"),
+                responses=[AddFlagResponse(flag_label="active", target=TargetTriggeringNode())],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db)
+    eng.handle_message(NODE_ID, "hello world", is_dm=True, channel_idx=0)
+    assert not db.has_flag("node", NODE_ID, "active")
+    eng.handle_message(NODE_ID, "hello", is_dm=True, channel_idx=0)
+    assert db.has_flag("node", NODE_ID, "active")
+
+
+def test_capture_variable_available_in_response_message(db):
+    cfg = _make_capture_config(
+        var_type="string", cmd_text="!setname {player_name}",
+        response_msg_text="Name set to: {player_name}",
+    )
+    eng = make_engine(cfg, db)
+    eng.handle_message(NODE_ID, "!setname Joey", is_dm=True, channel_idx=0)
+    assert any("Joey" in text for _, text in eng.sent_dms)
+
+
+# ---------------------------------------------------------------------------
+# Capture injection / security tests
+# ---------------------------------------------------------------------------
+
+def test_capture_template_injection_is_literal(db):
+    cfg = _make_capture_config(
+        var_type="string", cmd_text="!setname {player_name}",
+        response_msg_text="Name: {player_name}",
+    )
+    eng = make_engine(cfg, db)
+    # Player tries to inject a token — should be stored and echoed as literal text
+    eng.handle_message(NODE_ID, "!setname {node_id}", is_dm=True, channel_idx=0)
+    stored = db.get_mutable_variable("player_name", NODE_ID)
+    assert stored == "{node_id}"
+    # The response message should contain the literal braces, not the resolved node ID
+    assert any("{node_id}" in text and NODE_ID not in text for _, text in eng.sent_dms)
+
+
+def test_capture_hard_length_cap(db):
+    cfg = _make_capture_config(var_type="string", cmd_text="!setname {player_name}")
+    eng = make_engine(cfg, db)
+    long_name = "A" * 201
+    eng.handle_message(NODE_ID, f"!setname {long_name}", is_dm=True, channel_idx=0)
+    assert not db.has_flag("node", NODE_ID, "active")
+
+
+def test_capture_strips_surrounding_whitespace(db):
+    cfg = _make_capture_config(var_type="string", cmd_text="!setname {player_name}")
+    eng = make_engine(cfg, db)
+    eng.handle_message(NODE_ID, "!setname   Joey  ", is_dm=True, channel_idx=0)
+    stored = db.get_mutable_variable("player_name", NODE_ID)
+    assert stored == "Joey"
+
+
+def test_capture_sql_chars_stored_safely(db):
+    cfg = _make_capture_config(var_type="string", cmd_text="!setname {player_name}")
+    eng = make_engine(cfg, db)
+    dangerous = "'; DROP TABLE--"
+    eng.handle_message(NODE_ID, f"!setname {dangerous}", is_dm=True, channel_idx=0)
+    stored = db.get_mutable_variable("player_name", NODE_ID)
+    assert stored == dangerous
+
+
+def test_empty_initial_string_falls_back_to_node_id(db):
+    # initial: "" on a node-scoped string variable resolves to node_id in messages
+    from config import Message, MutableVariableDef, FlagDef
+    cfg = minimal_config(
+        messages=[
+            Message(label="announce", text="Winner: {player_name}"),
+            Message(label="cmd", text="!win"),
+        ],
+        mutable_variables=[
+            MutableVariableDef(label="player_name", type="string", scope="node", initial=""),
+        ],
+        flags=[FlagDef(label="active")],
+        events=[
+            Event(
+                label="win",
+                trigger=CommandTrigger(kind="dm", message_label="cmd"),
+                responses=[
+                    SendMessageResponse(message_label="announce", target=TargetTriggeringNode()),
+                    AddFlagResponse(flag_label="active", target=TargetTriggeringNode()),
+                ],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db)
+    eng.handle_message(NODE_ID, "!win", is_dm=True, channel_idx=0)
+    # player_name was never set — should fall back to node_id in the message
+    assert any(NODE_ID in text for _, text in eng.sent_dms)
+
+
+# ---------------------------------------------------------------------------
+# send_alert
+# ---------------------------------------------------------------------------
+
+def test_send_alert_calls_send_alert_helper(db):
+    cfg = minimal_config(
+        messages=[Message(label="cmd", text="!alert"), Message(label="danger", text="Danger!")],
+        events=[
+            Event(
+                label="alert_ev",
+                trigger=CommandTrigger(kind="dm", message_label="cmd"),
+                responses=[SendAlertResponse(message_label="danger", target=TargetTriggeringNode())],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db)
+    sent_alerts: list[tuple[str, str]] = []
+    eng._send_alert = lambda nid, text: sent_alerts.append((nid, text))
+    eng.handle_message(NODE_ID, "!alert", is_dm=True, channel_idx=0)
+    assert sent_alerts == [(NODE_ID, "Danger!")]
+
+def test_send_alert_channel_calls_alert_channel_helper(db):
+    cfg = minimal_config(
+        messages=[Message(label="cmd", text="!alert"), Message(label="warning", text="Warning!")],
+        events=[
+            Event(
+                label="ch_alert",
+                trigger=CommandTrigger(kind="dm", message_label="cmd"),
+                responses=[SendAlertResponse(message_label="warning", target=TargetChannel(channel_label="main"))],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db, channel_map={"main": 0})
+    sent_alert_channels: list[tuple[str, str]] = []
+    eng._send_alert_channel = lambda ch, text: sent_alert_channels.append((ch, text))
+    eng.handle_message(NODE_ID, "!alert", is_dm=True, channel_idx=0)
+    assert sent_alert_channels == [("main", "Warning!")]
+
+def test_send_alert_interpolates_variables(db):
+    cfg = minimal_config(
+        messages=[Message(label="cmd", text="!alert"), Message(label="alert_msg", text="Alert for {node_id}!")],
+        events=[
+            Event(
+                label="alert_ev",
+                trigger=CommandTrigger(kind="dm", message_label="cmd"),
+                responses=[SendAlertResponse(message_label="alert_msg", target=TargetTriggeringNode())],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db)
+    sent_alerts: list[tuple[str, str]] = []
+    eng._send_alert = lambda nid, text: sent_alerts.append((nid, text))
+    eng.handle_message(NODE_ID, "!alert", is_dm=True, channel_idx=0)
+    assert any(NODE_ID in text for _, text in sent_alerts)
+
+
+# ---------------------------------------------------------------------------
+# request_telemetry
+# ---------------------------------------------------------------------------
+
+def test_request_telemetry_queues_helper(db):
+    cfg = minimal_config(
+        messages=[Message(label="cmd", text="!telem")],
+        events=[
+            Event(
+                label="telem_ev",
+                trigger=CommandTrigger(kind="dm", message_label="cmd"),
+                responses=[RequestTelemetryResponse(target=TargetTriggeringNode())],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db)
+    requested: list[str] = []
+    eng._request_telemetry = lambda nid: requested.append(nid)
+    eng.handle_message(NODE_ID, "!telem", is_dm=True, channel_idx=0)
+    assert requested == [NODE_ID]
+
+
+# ---------------------------------------------------------------------------
+# node_* computed variable tracks
+# ---------------------------------------------------------------------------
+
+def _make_node_var_config(tracks: str) -> GameConfig:
+    return minimal_config(
+        messages=[
+            Message(label="cmd", text="!report"),
+            Message(label="report", text=f"val={{node_val}}"),
+        ],
+        variables=[
+            Variable(label="active_count", scope="global", tracks="flag_count", target="active"),
+            Variable(label="node_val", scope="node", tracks=tracks),
+        ],
+        events=[
+            Event(
+                label="report_ev",
+                trigger=CommandTrigger(kind="dm", message_label="cmd"),
+                responses=[SendMessageResponse(message_label="report", target=TargetTriggeringNode())],
+            )
+        ],
+    )
+
+def _send_and_get(db, tracks: str, node_info: dict) -> str:
+    cfg = _make_node_var_config(tracks)
+    eng = make_engine(cfg, db)
+    eng.interface.nodes = {NODE_ID: node_info}
+    eng.handle_message(NODE_ID, "!report", is_dm=True, channel_idx=0)
+    return eng.sent_dms[-1][1] if eng.sent_dms else ""
+
+def test_node_battery_level(db):
+    text = _send_and_get(db, "node_battery_level", {"deviceMetrics": {"batteryLevel": 82}})
+    assert "82" in text
+
+def test_node_voltage(db):
+    text = _send_and_get(db, "node_voltage", {"deviceMetrics": {"voltage": 3.85}})
+    assert "3.85" in text
+
+def test_node_channel_utilization(db):
+    text = _send_and_get(db, "node_channel_utilization", {"deviceMetrics": {"channelUtilization": 12.5}})
+    assert "12.5" in text
+
+def test_node_air_util_tx(db):
+    text = _send_and_get(db, "node_air_util_tx", {"deviceMetrics": {"airUtilTx": 4.2}})
+    assert "4.2" in text
+
+def test_node_uptime_seconds(db):
+    text = _send_and_get(db, "node_uptime_seconds", {"deviceMetrics": {"uptimeSeconds": 3600}})
+    assert "3600" in text
+
+def test_node_snr(db):
+    text = _send_and_get(db, "node_snr", {"snr": 7.5})
+    assert "7.50" in text
+
+def test_node_hops_away(db):
+    text = _send_and_get(db, "node_hops_away", {"hopsAway": 2})
+    assert "2" in text
+
+def test_node_hw_model(db):
+    text = _send_and_get(db, "node_hw_model", {"user": {"hwModel": "TBEAM"}})
+    assert "TBEAM" in text
+
+def test_node_role(db):
+    text = _send_and_get(db, "node_role", {"user": {"role": "ROUTER"}})
+    assert "ROUTER" in text
+
+def test_node_var_unknown_when_no_telemetry(db):
+    text = _send_and_get(db, "node_battery_level", {})
+    assert "[unknown]" in text
+
+def test_node_var_unknown_when_node_not_in_nodedb(db):
+    cfg = _make_node_var_config("node_battery_level")
+    eng = make_engine(cfg, db)
+    eng.interface.nodes = {}
+    eng.handle_message(NODE_ID, "!report", is_dm=True, channel_idx=0)
+    assert any("[unknown]" in text for _, text in eng.sent_dms)

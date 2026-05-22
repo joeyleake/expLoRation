@@ -14,8 +14,8 @@ from config import (
     GameConfig, Event, Variable, MutableVariableDef,
     ProximityTrigger, TimedTrigger, CommandTrigger, VariableThresholdTrigger,
     FlagExpiryTrigger, WaypointExpiryTrigger,
-    SendMessageResponse, AddFlagResponse, RemoveFlagResponse,
-    RequestLocationResponse, SetEventTriggersResponse,
+    SendMessageResponse, SendAlertResponse, AddFlagResponse, RemoveFlagResponse,
+    RequestLocationResponse, RequestTelemetryResponse, SetEventTriggersResponse,
     DisableEventResponse, EnableEventResponse,
     AddToGroupResponse, RemoveFromGroupResponse,
     SetVariableResponse, IncrementVariableResponse,
@@ -34,6 +34,36 @@ log = logging.getLogger(__name__)
 
 _MAX_MSG_BYTES = 200
 _VAR_RE = re.compile(r'\{(\w+)\}')
+_BUILTIN_TOKENS = frozenset({"node_id", "node_shortname", "node_longname", "zone"})
+_CAPTURE_HARD_CAP = 200
+
+
+def _find_capture_var(template: str, mutable_var_defs: dict) -> str | None:
+    tokens = _VAR_RE.findall(template)
+    captures = [t for t in tokens if t in mutable_var_defs and t not in _BUILTIN_TOKENS]
+    return captures[0] if len(captures) == 1 else None
+
+
+def _split_capture_pattern(template: str, var_label: str) -> tuple[str, str]:
+    token = f"{{{var_label}}}"
+    idx = template.index(token)
+    return template[:idx].rstrip(), template[idx + len(token):].lstrip()
+
+
+def _can_coerce_capture(var_type: str, value: str) -> bool:
+    if var_type == "integer":
+        try:
+            int(value)
+            return True
+        except ValueError:
+            return False
+    if var_type == "float":
+        try:
+            float(value)
+            return True
+        except ValueError:
+            return False
+    return True
 
 
 def _split_message(text: str) -> list[str]:
@@ -199,6 +229,7 @@ class Engine:
         for event in self.config.events:
             if isinstance(event.trigger, CommandTrigger):
                 if self._should_fire(event, ctx):
+                    self._apply_command_capture(event, ctx)
                     self._fire_event(event, ctx)
         for event in self.config.events:
             if isinstance(event.trigger, VariableThresholdTrigger):
@@ -400,8 +431,31 @@ class Engine:
             message = self._get_message(t.message_label)
             if message is None:
                 return False
-            if ctx.text.strip() != message.text.strip():
-                return False
+            var_label = _find_capture_var(message.text, self._mutable_var_defs)
+            if var_label is None:
+                if ctx.text.strip() != message.text.strip():
+                    return False
+            else:
+                prefix, suffix = _split_capture_pattern(message.text, var_label)
+                incoming = ctx.text.strip()
+                if not incoming.startswith(prefix):
+                    return False
+                remainder = incoming[len(prefix):].lstrip()
+                if suffix:
+                    if not remainder.endswith(suffix):
+                        return False
+                    captured = remainder[: len(remainder) - len(suffix)].rstrip()
+                else:
+                    captured = remainder
+                if not captured:
+                    return False
+                if len(captured) > _CAPTURE_HARD_CAP:
+                    return False
+                var_def = self._mutable_var_defs[var_label]
+                if var_def.max_length is not None and len(captured) > var_def.max_length:
+                    return False
+                if not _can_coerce_capture(var_def.type, captured):
+                    return False
             if t.kind == "dm" and not ctx.is_dm:
                 return False
             if t.kind == "channel":
@@ -594,6 +648,31 @@ class Engine:
         if not self._check_exceptions(event, ctx):
             self._fire_event(event, ctx)
 
+    def _apply_command_capture(self, event: Event, ctx: MessageContext) -> None:
+        trigger = event.trigger
+        if not isinstance(trigger, CommandTrigger):
+            return
+        message = self._get_message(trigger.message_label)
+        if message is None:
+            return
+        var_label = _find_capture_var(message.text, self._mutable_var_defs)
+        if var_label is None:
+            return
+        var_def = self._mutable_var_defs[var_label]
+        prefix, suffix = _split_capture_pattern(message.text, var_label)
+        incoming = ctx.text.strip()
+        remainder = incoming[len(prefix):].lstrip()
+        captured = remainder[: len(remainder) - len(suffix)].rstrip() if suffix else remainder
+        if var_def.type == "integer":
+            value = int(captured)
+        elif var_def.type == "float":
+            value = float(captured)
+        else:
+            value = captured
+        value = self._clamp_value(var_def, value)
+        self.state.set_mutable_variable(var_def.label, value, ctx.node_id)
+        log.info("capture_command: set %r[%s] = %r", var_def.label, ctx.node_id, value)
+
     def _fire_event(self, event: Event, ctx: Context) -> None:
         log.info("Firing event %r (ctx=%s)", event.label, ctx)
         for resp in event.responses:
@@ -629,6 +708,18 @@ class Engine:
                 for nid in nodes:
                     self._send_dm(nid, text)
 
+        elif isinstance(resp, SendAlertResponse):
+            message = self._get_message(resp.message_label)
+            if message is None:
+                return
+            text = self._interpolate(message.text, node_id, zone_id)
+            if isinstance(resp.target, TargetChannel):
+                self._send_alert_channel(resp.target.channel_label, text)
+            else:
+                nodes = self._resolve_node_targets(resp.target, node_id, wp_id)
+                for nid in nodes:
+                    self._send_alert(nid, text)
+
         elif isinstance(resp, (AddFlagResponse, RemoveFlagResponse)):
             adding = isinstance(resp, AddFlagResponse)
             flag_def = self._get_flag_def(resp.flag_label)
@@ -646,6 +737,11 @@ class Engine:
             nodes = self._resolve_node_targets(resp.target, node_id, wp_id)
             for nid in nodes:
                 self._request_location(nid)
+
+        elif isinstance(resp, RequestTelemetryResponse):
+            nodes = self._resolve_node_targets(resp.target, node_id, wp_id)
+            for nid in nodes:
+                self._request_telemetry(nid)
 
         elif isinstance(resp, SetEventTriggersResponse):
             self.state.set_event_triggers(resp.event_label, resp.value)
@@ -939,6 +1035,46 @@ class Engine:
                 log.info("DM → %s: %r", node_id, c[:60])
             self._send_queue.put(_fn)
 
+    def _send_alert(self, node_id: str, text: str) -> None:
+        if self._suppress_messages:
+            return
+        try:
+            dest = int(node_id.lstrip("!"), 16)
+        except ValueError:
+            log.warning("Invalid node_id for alert: %r", node_id)
+            return
+        from meshtastic import mesh_pb2, portnums_pb2
+        for chunk in _split_message(text):
+            def _fn(c=chunk, d=dest):
+                self.interface.sendData(
+                    c.encode("utf-8"),
+                    destinationId=d,
+                    portNum=portnums_pb2.PortNum.TEXT_MESSAGE_APP,
+                    channelIndex=0,
+                    priority=mesh_pb2.MeshPacket.Priority.ALERT,
+                )
+                log.info("Alert → %s: %r", node_id, c[:60])
+            self._send_queue.put(_fn)
+
+    def _send_alert_channel(self, channel_label: str, text: str) -> None:
+        if self._suppress_messages:
+            return
+        idx = self.channel_index_map.get(channel_label)
+        if idx is None:
+            log.warning("Channel %r not mapped to a device index", channel_label)
+            return
+        from meshtastic import mesh_pb2, portnums_pb2
+        for chunk in _split_message(text):
+            def _fn(c=chunk, i=idx):
+                self.interface.sendData(
+                    c.encode("utf-8"),
+                    portNum=portnums_pb2.PortNum.TEXT_MESSAGE_APP,
+                    channelIndex=i,
+                    priority=mesh_pb2.MeshPacket.Priority.ALERT,
+                )
+                log.info("Alert channel[%d] broadcast: %r", i, c[:60])
+            self._send_queue.put(_fn)
+
     def _send_channel(self, channel_label: str, text: str) -> None:
         if self._suppress_messages:
             return
@@ -969,6 +1105,26 @@ class Engine:
             log.info("Location request → %s", node_id)
         self._send_queue.put(_fn)
 
+    def _request_telemetry(self, node_id: str) -> None:
+        try:
+            dest = int(node_id.lstrip("!"), 16)
+        except ValueError:
+            log.warning("Invalid node_id for telemetry request: %r", node_id)
+            return
+        def _fn(d=dest):
+            from meshtastic import portnums_pb2
+            from meshtastic.protobuf import telemetry_pb2
+            r = telemetry_pb2.Telemetry()
+            r.device_metrics.CopyFrom(telemetry_pb2.DeviceMetrics())
+            self.interface.sendData(
+                data=r,
+                destinationId=d,
+                portNum=portnums_pb2.PortNum.TELEMETRY_APP,
+                wantResponse=True,
+            )
+            log.info("Telemetry request → %s", node_id)
+        self._send_queue.put(_fn)
+
     # ------------------------------------------------------------------
     # Config lookups
     # ------------------------------------------------------------------
@@ -978,6 +1134,16 @@ class Engine:
             label = m.group(1)
             if label == "node_id":
                 return triggering_node_id or "[unknown]"
+            if label == "node_shortname":
+                if triggering_node_id is None:
+                    return "[unknown]"
+                info = (self.interface.nodes or {}).get(triggering_node_id, {})
+                return info.get("user", {}).get("shortName", "").strip() or triggering_node_id
+            if label == "node_longname":
+                if triggering_node_id is None:
+                    return "[unknown]"
+                info = (self.interface.nodes or {}).get(triggering_node_id, {})
+                return info.get("user", {}).get("longName", "").strip() or triggering_node_id
             if label == "zone":
                 return triggering_zone or "[unknown]"
             var = self._get_variable(label)
@@ -1120,6 +1286,40 @@ class Engine:
                 ref = (wp.lat, wp.lon)
             return str(round(geo.haversine(*ref, *target_loc)))
 
+        if var.tracks in (
+            "node_battery_level", "node_voltage", "node_channel_utilization",
+            "node_air_util_tx", "node_uptime_seconds", "node_snr",
+            "node_hops_away", "node_hw_model", "node_role",
+        ):
+            if triggering_node_id is None:
+                return "[no node context]"
+            node_info = (self.interface.nodes or {}).get(triggering_node_id, {})
+            if var.tracks == "node_battery_level":
+                val = node_info.get("deviceMetrics", {}).get("batteryLevel")
+                return str(val) if val is not None else "[unknown]"
+            if var.tracks == "node_voltage":
+                val = node_info.get("deviceMetrics", {}).get("voltage")
+                return f"{val:.2f}" if val is not None else "[unknown]"
+            if var.tracks == "node_channel_utilization":
+                val = node_info.get("deviceMetrics", {}).get("channelUtilization")
+                return f"{val:.1f}" if val is not None else "[unknown]"
+            if var.tracks == "node_air_util_tx":
+                val = node_info.get("deviceMetrics", {}).get("airUtilTx")
+                return f"{val:.1f}" if val is not None else "[unknown]"
+            if var.tracks == "node_uptime_seconds":
+                val = node_info.get("deviceMetrics", {}).get("uptimeSeconds")
+                return str(val) if val is not None else "[unknown]"
+            if var.tracks == "node_snr":
+                val = node_info.get("snr")
+                return f"{val:.2f}" if val is not None else "[unknown]"
+            if var.tracks == "node_hops_away":
+                val = node_info.get("hopsAway")
+                return str(val) if val is not None else "[unknown]"
+            if var.tracks == "node_hw_model":
+                return node_info.get("user", {}).get("hwModel", "[unknown]")
+            if var.tracks == "node_role":
+                return node_info.get("user", {}).get("role", "[unknown]")
+
         if var.tracks in ("nearest_node_distance", "nearest_node_name"):
             excluded = set(self.state.get_nodes_with_flag(var.exclude_flag)) if var.exclude_flag else set()
             if var.scope == "zone":
@@ -1155,7 +1355,11 @@ class Engine:
             raw = self.state.get_mutable_variable(var_def.label)
         if raw is None:
             raw = var_def.initial
-        return str(raw)
+        result = str(raw)
+        # initial: "" means "use node_id as display fallback" — never show a blank name
+        if not result and var_def.scope == "node" and triggering_node_id is not None:
+            return triggering_node_id
+        return result
 
     def _get_variable(self, label: str) -> Variable | None:
         return next((v for v in self.config.variables if v.label == label), None)

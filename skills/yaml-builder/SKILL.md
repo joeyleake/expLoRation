@@ -90,8 +90,72 @@ Generate a complete, runnable YAML file. Follow these rules:
 - For game announcements, use emoji sparingly for visual scanning
 - Multi-line messages use YAML `|` block scalar
 - Messages longer than ~180 chars will be split by the engine — design accordingly
-- Use `{node_id}` to name the triggering node in announcements
+- Use `{node_id}` for the raw hex ID, `{node_shortname}` for the 4-char callsign, or `{node_longname}` for the full display name when naming the triggering node in announcements; prefer shortname/longname for player-facing messages
 - Use `{zone}` to name the zone in messages where it adds context
+
+**Templated commands (variable capture):**
+
+Place exactly one `{mutable_variable_label}` token in a `dm` or `channel` message
+text to turn it into a capture command. Everything before the token is the fixed
+prefix; everything after is the fixed suffix. The captured text is stored in the
+named variable for the triggering node before responses fire.
+
+```yaml
+- label: player_name
+  type: string
+  scope: node      # must be scope: node
+  initial: "unknown"
+  max_length: 32   # apply max_length on string vars used in broadcasts
+
+messages:
+  - label: setname_cmd
+    text: "!setname {player_name}"
+```
+
+**Alerts (`send_alert`):**
+
+Use `send_alert` instead of `send_message` when the message represents a genuine
+safety or urgency situation — for example, notifying a player who has entered a
+restricted or dangerous area. Alerts are sent as `TEXT_MESSAGE_APP` with
+`Priority.ALERT`, so they appear as normal text in all clients but receive
+preferential routing through the mesh. On nodes with the External Notification
+module configured, they may also trigger hardware buzzers or vibration.
+
+```yaml
+- type: send_alert
+  message_label: danger_msg
+  to_triggering_node: true
+```
+
+**Node hardware and telemetry variables:**
+
+Nine node-scoped `tracks` values expose live data from the bot's nodedb:
+
+| `tracks` value | Returns |
+|---|---|
+| `node_battery_level` | Battery % (integer) |
+| `node_voltage` | Supply voltage (e.g. `3.85`) |
+| `node_channel_utilization` | Channel utilization % |
+| `node_air_util_tx` | TX air utilization % |
+| `node_uptime_seconds` | Seconds since last boot |
+| `node_snr` | SNR of last received packet |
+| `node_hops_away` | Hop count from bot's radio |
+| `node_hw_model` | Hardware model string (e.g. `TBEAM`) |
+| `node_role` | Node role (e.g. `CLIENT`, `ROUTER`) |
+
+All require `scope: node`. Telemetry values are only as fresh as the last
+telemetry broadcast — use `request_telemetry` to prompt a fresh update. Use
+`request_telemetry` in the same event as a `variable_threshold` or DM command
+to keep values current.
+
+**Security considerations for captured values:**
+- Captured values come from untrusted radio nodes — treat them like user input.
+- Captured values are stored as **literals** and are never re-interpolated. A player
+  who sends `!setname {node_id}` stores the text `{node_id}`, not their real ID.
+- Apply `max_length` on any string variable used in broadcast messages to prevent
+  a malicious player from flooding the channel with long text.
+- Prefer `type: integer` or `type: float` with `min`/`max` bounds for numeric inputs:
+  type mismatch blocks the trigger automatically, no extra validation needed.
 
 **Common patterns to apply correctly:**
 
@@ -356,7 +420,7 @@ messages:
     text: "🎉 {node_id} found the cache!"
 ```
 Use `{label}` to interpolate any defined variable (computed or mutable).
-`{node_id}` and `{zone}` are always available as built-in tokens.
+`{node_id}`, `{node_shortname}`, `{node_longname}`, and `{zone}` are always available as built-in tokens.
 Node-scoped variables resolve to the triggering node's value.
 
 **Game state anchor:**
@@ -420,6 +484,9 @@ Before outputting any YAML, mentally verify:
 - [ ] `set_variable`/`increment_variable` on `scope: node` variables have a target; `scope: global` have no target
 - [ ] `variable_threshold` `operator` is one of: `lt`, `lte`, `eq`, `neq`, `gte`, `gt`
 - [ ] `flag_expired` has `target_kind`; `waypoint_expired` does not require it
+- [ ] Capture templates (`{mutable_var}` in command messages): at most one capture token per message; variable must be `scope: node`; `max_length` set on string vars that appear in broadcast messages
+- [ ] `send_alert` used only for genuine safety/urgency situations, not ordinary confirmations
+- [ ] `node_*` tracks variables are `scope: node`; pair with `request_telemetry` if fresh values are needed
 - [ ] No real-world coordinates, node IDs, or personally-identifying information
 
 ## Reference examples

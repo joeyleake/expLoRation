@@ -1,11 +1,13 @@
 # expLoRation — Warmer/Colder Geocache
 #
-# A single search zone with one hidden cache waypoint. Nodes are welcomed
-# on zone entry with a clue and can DM !hint for warmer/colder feedback
-# based on their last two known positions. After 5 hints the distance is
-# included; after 10 hints the cardinal direction is added as well. A second
-# clue fires automatically within 10 m. The player wins by DMing the cache
-# password, which announces their success to the Geocaching channel.
+# A single search zone with one hidden cache waypoint. Players can DM
+# !setname to register a custom display name; if unset, their node ID is
+# used instead. Nodes are welcomed on zone entry with a clue and can DM
+# !hint for warmer/colder feedback based on their last two known positions.
+# After 5 hints the distance is included; after 10 hints the cardinal
+# direction is added as well. A second clue fires automatically within 10 m.
+# The player wins by DMing the cache password, which announces their
+# success (by name) to the Geocaching channel.
 #
 # Warmer/colder routing uses two flags (dir_closer, dir_farther) set on
 # each position update via distance_change_to_waypoint. The nine hint
@@ -60,12 +62,17 @@ flags:
 # Messages
 # ---------------------------------------------------------------------------
 messages:
+  - label: setname_cmd
+    text: "!setname {player_name}"
   - label: hint_cmd
     text: "!hint"
   - label: status_cmd
     text: "!status"
   - label: password_cmd
     text: "abracadabra"
+
+  - label: setname_confirmed_msg
+    text: "Name registered! You'll appear as '{player_name}' in all announcements."
 
   - label: welcome_msg
     text: |
@@ -74,12 +81,13 @@ messages:
       Clue: follow the sound of water — the cache rests where
       roots meet stone, off the main path.
       DM !hint after moving for warmer/colder guidance.
+      DM !setname YOUR_NAME to personalise your announcements.
 
   - label: reenter_msg
-    text: "Welcome back to the search area. The cache is still out there — use !hint for guidance."
+    text: "Welcome back, {player_name}! The cache is still out there — use !hint for guidance."
 
   - label: exit_msg
-    text: "⚠️ You've left the search zone. Head back to continue the hunt."
+    text: "⚠️ {player_name}, you've left the search zone. Head back to continue the hunt."
 
   - label: hint_warmer_msg
     text: "🔥 Warmer — you're heading in the right direction. Keep going."
@@ -115,7 +123,7 @@ messages:
       something that blends in is hiding in plain sight.
 
   - label: found_announcement
-    text: "🎉 {node_id} has found the Fernwood Geocache! Well done!"
+    text: "🎉 {player_name} has found the Fernwood Geocache! Well done!"
 
   - label: status_msg
     text: "📡 GeocacheBot online. The Fernwood cache is active and waiting to be found."
@@ -124,6 +132,12 @@ messages:
 # Variables
 # ---------------------------------------------------------------------------
 mutable_variables:
+  - label: player_name
+    type: string
+    scope: node
+    initial: ""        # empty string → node_id used as display fallback until !setname is run
+    max_length: 24     # caps broadcast length; Meshtastic hard limit of 200 always applies
+
   - label: hint_count
     type: integer
     scope: node
@@ -158,6 +172,18 @@ variables:
 # Events
 # ---------------------------------------------------------------------------
 events:
+
+  # --- Name registration ---
+
+  - label: set_name
+    trigger:
+      type: dm
+      message_label: setname_cmd
+    trigger_per_node: true
+    responses:
+      - type: send_message
+        message_label: setname_confirmed_msg
+        to_triggering_node: true
 
   # --- Zone entry / exit ---
 
@@ -238,7 +264,6 @@ events:
   #   hint_colder: fires when node HAS dir_farther AND NOT dir_closer
   #   hint_same:   fires when node has NEITHER flag (both has_flag exceptions skip it if present)
   # All three: skip if hint_cooldown active; skip if hint_veteran (veteran/expert events handle those)
-  # All three: clear both direction flags so repeat !hint without movement returns hint_same
 
   - label: hint_warmer_basic
     trigger:
@@ -594,8 +619,7 @@ events:
       type: in_zone
       target: search_zone
     trigger_per_node: true
-    auto_recur: true
-    recur_mins: 10
+    reset_mins: 10
     responses:
       - type: request_location
         to_triggering_node: true

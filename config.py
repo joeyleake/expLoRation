@@ -71,6 +71,7 @@ class MutableVariableDef:
     initial: int | float | str
     min: int | float | None = None
     max: int | float | None = None
+    max_length: int | None = None  # string type only; hard cap of 200 always applies
 
 
 @dataclass
@@ -79,7 +80,10 @@ class Variable:
     scope: str            # global | node | zone | waypoint | event
     tracks: str           # static | node_count | event_trigger_count | flag_count |
                           # waypoint_node_count | distance_to_waypoint | distance_to_zone |
-                          # distance_to_node | nearest_node_distance | nearest_node_name
+                          # distance_to_node | nearest_node_distance | nearest_node_name |
+                          # node_battery_level | node_voltage | node_channel_utilization |
+                          # node_air_util_tx | node_uptime_seconds | node_snr |
+                          # node_hops_away | node_hw_model | node_role
     target: str | None = None        # zone/waypoint/event/flag label (tracks-dependent)
     value: str | None = None         # required for tracks: static
     event: str | None = None         # required for tracks: event_trigger_count
@@ -238,6 +242,12 @@ class SendMessageResponse:
 
 
 @dataclass
+class SendAlertResponse:
+    message_label: str
+    target: Target
+
+
+@dataclass
 class AddFlagResponse:
     flag_label: str
     target: Target
@@ -251,6 +261,11 @@ class RemoveFlagResponse:
 
 @dataclass
 class RequestLocationResponse:
+    target: Target
+
+
+@dataclass
+class RequestTelemetryResponse:
     target: Target
 
 
@@ -338,9 +353,11 @@ class DestroyWaypointResponse:
 
 Response = (
     SendMessageResponse
+    | SendAlertResponse
     | AddFlagResponse
     | RemoveFlagResponse
     | RequestLocationResponse
+    | RequestTelemetryResponse
     | SetEventTriggersResponse
     | DisableEventResponse
     | EnableEventResponse
@@ -451,12 +468,16 @@ def _parse_response(raw: dict) -> Response:
     kind = raw.get("type")
     if kind == "send_message":
         return SendMessageResponse(raw["message_label"], _parse_target(raw))
+    if kind == "send_alert":
+        return SendAlertResponse(raw["message_label"], _parse_target(raw))
     if kind == "add_flag":
         return AddFlagResponse(raw["flag_label"], _parse_target(raw))
     if kind == "remove_flag":
         return RemoveFlagResponse(raw["flag_label"], _parse_target(raw))
     if kind == "request_location":
         return RequestLocationResponse(_parse_target(raw))
+    if kind == "request_telemetry":
+        return RequestTelemetryResponse(_parse_target(raw))
     if kind == "set_event_triggers":
         return SetEventTriggersResponse(raw["event_label"], int(raw["value"]))
     if kind == "disable_event":
@@ -603,7 +624,7 @@ def _validate_response(
     channel_labels: set, group_labels: set,
     ctx: str,
 ) -> None:
-    if isinstance(resp, SendMessageResponse):
+    if isinstance(resp, (SendMessageResponse, SendAlertResponse)):
         _check_label(resp.message_label, message_labels, ctx)
     if isinstance(resp, (AddFlagResponse, RemoveFlagResponse)):
         _check_label(resp.flag_label, flag_labels, ctx)
@@ -720,6 +741,11 @@ def _validate(cfg: GameConfig) -> None:
             raise ConfigError(f"{mvctx}: scope must be one of {_MV_SCOPES}")
         if mv.type == "string" and (mv.min is not None or mv.max is not None):
             raise ConfigError(f"{mvctx}: min/max not valid for string type")
+        if mv.max_length is not None:
+            if mv.type != "string":
+                raise ConfigError(f"{mvctx}: max_length only valid for type: string")
+            if not isinstance(mv.max_length, int) or isinstance(mv.max_length, bool) or mv.max_length < 1:
+                raise ConfigError(f"{mvctx}: max_length must be a positive integer")
         if mv.type == "integer" and (not isinstance(mv.initial, int) or isinstance(mv.initial, bool)):
             raise ConfigError(f"{mvctx}: initial must be an integer")
         elif mv.type == "float" and (not isinstance(mv.initial, (int, float)) or isinstance(mv.initial, bool)):
@@ -956,6 +982,13 @@ def _validate(cfg: GameConfig) -> None:
                 raise ConfigError(f"{vctx} field 'node': must be a node label")
         elif var.tracks in ("seconds_since_last_update", "current_position", "prev_position"):
             pass  # no target required — computed from triggering node's location history
+        elif var.tracks in (
+            "node_battery_level", "node_voltage", "node_channel_utilization",
+            "node_air_util_tx", "node_uptime_seconds", "node_snr",
+            "node_hops_away", "node_hw_model", "node_role",
+        ):
+            if var.scope != "node":
+                raise ConfigError(f"{vctx}: tracks: {var.tracks!r} requires scope: node")
         elif var.tracks in ("nearest_node_distance", "nearest_node_name"):
             if var.scope == "zone" and (var.target is None or var.target not in zone_labels):
                 raise ConfigError(f"{vctx} field 'target': must be a zone label for scope: zone")
@@ -967,13 +1000,35 @@ def _validate(cfg: GameConfig) -> None:
             raise ConfigError(f"{vctx}: unknown tracks value {var.tracks!r}")
 
     all_variable_labels = variable_labels | mutable_var_labels
-    _BUILTIN_TOKENS = frozenset({"node_id", "zone"})
+    _BUILTIN_TOKENS = frozenset({"node_id", "node_shortname", "node_longname", "zone"})
     _VAR_TOKEN_RE = re.compile(r'\{(\w+)\}')
     for msg in cfg.messages:
         for token in _VAR_TOKEN_RE.findall(msg.text):
             if token not in all_variable_labels and token not in _BUILTIN_TOKENS:
                 raise ConfigError(
                     f"Message {msg.label!r}: interpolation token '{{{token}}}' not defined in variables"
+                )
+
+    # Validate capture templates: CommandTrigger messages with mutable variable tokens
+    _cmd_events = [e for e in cfg.events if isinstance(e.trigger, CommandTrigger)]
+    for event in _cmd_events:
+        t = event.trigger
+        msg = next((m for m in cfg.messages if m.label == t.message_label), None)
+        if msg is None:
+            continue
+        tokens = _VAR_TOKEN_RE.findall(msg.text)
+        capture_vars = [tok for tok in tokens if tok in mutable_var_def_map and tok not in _BUILTIN_TOKENS]
+        if len(capture_vars) > 1:
+            raise ConfigError(
+                f"Event {event.label!r}: command message {msg.label!r} has more than one "
+                f"capture variable ({capture_vars!r}); only one allowed per command"
+            )
+        if len(capture_vars) == 1:
+            var_def = mutable_var_def_map[capture_vars[0]]
+            if var_def.scope != "node":
+                raise ConfigError(
+                    f"Event {event.label!r}: capture variable {capture_vars[0]!r} "
+                    f"must be scope: node"
                 )
 
 
@@ -1081,6 +1136,7 @@ def load_config(path: str) -> GameConfig:
                 initial=mv["initial"],
                 min=mv.get("min"),
                 max=mv.get("max"),
+                max_length=mv.get("max_length"),
             )
             for mv in raw.get("mutable_variables", [])
         ],
