@@ -58,6 +58,22 @@ zones:
       - [51.0025, 0.5440]   # forward point
 
 # ---------------------------------------------------------------------------
+# Groups
+# ---------------------------------------------------------------------------
+groups:
+  - label: outer_grounds
+    kind: zone
+    initial_members:
+      - outer_grounds_a
+      - outer_grounds_b
+
+  - label: moat_perimeter
+    kind: zone
+    initial_members:
+      - moat_perimeter_a
+      - moat_perimeter_b
+
+# ---------------------------------------------------------------------------
 # Waypoints
 # ---------------------------------------------------------------------------
 waypoints:
@@ -181,11 +197,11 @@ events:
         message_label: dawn_report
         to_channel: war_council
 
-  # Outer grounds — enemy scouts detected
+  # Outer grounds — enemy scouts detected (either triangle)
   - label: outer_grounds_incursion
     trigger:
-      type: enters_zone
-      target: outer_grounds_a
+      type: enters_zone_group
+      zone_group: outer_grounds
     trigger_per_node: true
     responses:
       - type: add_flag
@@ -202,51 +218,11 @@ events:
         flag: defender
     reset_mins: 15
 
-  - label: outer_grounds_incursion_b
+  # Moat perimeter — serious incursion (either triangle)
+  - label: moat_perimeter_breach
     trigger:
-      type: enters_zone
-      target: outer_grounds_b
-    trigger_per_node: true
-    responses:
-      - type: add_flag
-        flag_label: scout_detected
-        to_triggering_node: true
-      - type: send_message
-        message_label: scouts_spotted
-        to_channel: war_council
-      - type: send_message
-        message_label: scouts_spotted
-        to_node: lord_commander
-    exceptions:
-      - kind: node_has_flag
-        flag: defender
-    reset_mins: 15
-
-  # Moat perimeter — serious incursion
-  - label: moat_perimeter_breach_a
-    trigger:
-      type: enters_zone
-      target: moat_perimeter_a
-    trigger_per_node: true
-    responses:
-      - type: add_flag
-        flag_label: breach_imminent
-        to_triggering_node: true
-      - type: send_message
-        message_label: moat_breach
-        to_channel: war_council
-      - type: send_message
-        message_label: moat_breach
-        to_node: lord_commander
-    exceptions:
-      - kind: node_has_flag
-        flag: defender
-    reset_mins: 10
-
-  - label: moat_perimeter_breach_b
-    trigger:
-      type: enters_zone
-      target: moat_perimeter_b
+      type: enters_zone_group
+      zone_group: moat_perimeter
     trigger_per_node: true
     responses:
       - type: add_flag

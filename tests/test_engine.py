@@ -9,10 +9,10 @@ from config import (
     SendMessageResponse, AddFlagResponse, RemoveFlagResponse,
     SetVariableResponse, IncrementVariableResponse,
     RandomOptionsResponse, RandomOption, WithNodeResponse,
-    TargetTriggeringNode, TargetChannel, TargetFlag, TargetAllWithFlag,
+    TargetTriggeringNode, TargetChannel, TargetFlag, TargetAllWithFlag, TargetGroup,
     EventException,
 )
-from tests.conftest import minimal_config, make_engine, INSIDE_ZONE, OUTSIDE_ZONE, NODE_ID, NODE2_ID
+from tests.conftest import minimal_config, make_engine, INSIDE_ZONE, OUTSIDE_ZONE, ZONE_POINTS, NODE_ID, NODE2_ID
 
 
 # ---------------------------------------------------------------------------
@@ -1123,3 +1123,442 @@ def test_set_event_triggers_response(db):
     count, _ = db.get_event_state("reset_target")
     # The response set it to 0; then _fire_event incremented it to 1
     assert count == 1
+
+
+# ---------------------------------------------------------------------------
+# near_zone trigger
+# ---------------------------------------------------------------------------
+
+def test_near_zone_fires_in_range(db):
+    # INSIDE_ZONE is ~45m from zone_a centroid
+    cfg = minimal_config(events=[
+        Event(
+            label="near_ev",
+            trigger=ProximityTrigger(kind="near_zone", target_label="zone_a", meters=100),
+            responses=[AddFlagResponse(flag_label="active", target=TargetTriggeringNode())],
+        )
+    ])
+    eng = make_engine(cfg, db)
+    eng.handle_position(NODE_ID, *INSIDE_ZONE)
+    assert db.has_flag("node", NODE_ID, "active")
+
+
+def test_near_zone_no_fire_out_of_range(db):
+    # OUTSIDE_ZONE is ~8km from zone_a centroid
+    cfg = minimal_config(events=[
+        Event(
+            label="near_ev",
+            trigger=ProximityTrigger(kind="near_zone", target_label="zone_a", meters=100),
+            responses=[AddFlagResponse(flag_label="active", target=TargetTriggeringNode())],
+        )
+    ])
+    eng = make_engine(cfg, db)
+    eng.handle_position(NODE_ID, *OUTSIDE_ZONE)
+    assert not db.has_flag("node", NODE_ID, "active")
+
+
+# ---------------------------------------------------------------------------
+# in_zone_on_start trigger
+# ---------------------------------------------------------------------------
+
+def test_in_zone_on_start_fires(db):
+    from config import TargetZone
+    cfg = minimal_config(events=[
+        Event(
+            label="start_ev",
+            trigger=ProximityTrigger(kind="in_zone_on_start", target_label="zone_a"),
+            responses=[AddFlagResponse(flag_label="active", target=TargetZone("zone_a"))],
+        )
+    ])
+    eng = make_engine(cfg, db)
+    eng.handle_position(NODE_ID, *INSIDE_ZONE)   # seed node inside zone
+    eng.handle_periodic()
+    assert db.has_flag("zone", "zone_a", "active")
+
+
+def test_in_zone_on_start_no_fire_when_empty(db):
+    cfg = minimal_config(events=[
+        Event(
+            label="start_ev",
+            trigger=ProximityTrigger(kind="in_zone_on_start", target_label="zone_a"),
+            responses=[AddFlagResponse(flag_label="active", target=TargetTriggeringNode())],
+        )
+    ])
+    eng = make_engine(cfg, db)
+    eng.handle_position(NODE_ID, *OUTSIDE_ZONE)  # node outside zone
+    eng.handle_periodic()
+    assert not db.has_flag("zone", "zone_a", "active")
+
+
+# ---------------------------------------------------------------------------
+# Command trigger: zone_label gating and channel trigger
+# ---------------------------------------------------------------------------
+
+def test_command_zone_label_blocks_when_outside(db):
+    from config import Message
+    cfg = minimal_config(
+        messages=[Message(label="hello", text="hello"),
+                  Message(label="greet_node", text="Hi {node_id}"),
+                  Message(label="greet_zone", text="Zone: {zone}")],
+        events=[
+            Event(
+                label="zone_cmd",
+                trigger=CommandTrigger(kind="dm", message_label="hello", zone_label="zone_a"),
+                responses=[AddFlagResponse(flag_label="active", target=TargetTriggeringNode())],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db)
+    eng.handle_position(NODE_ID, *OUTSIDE_ZONE)
+    eng.handle_message(NODE_ID, "hello", is_dm=True, channel_idx=0)
+    assert not db.has_flag("node", NODE_ID, "active")
+
+
+def test_command_zone_label_fires_when_inside(db):
+    from config import Message
+    cfg = minimal_config(
+        messages=[Message(label="hello", text="hello"),
+                  Message(label="greet_node", text="Hi {node_id}"),
+                  Message(label="greet_zone", text="Zone: {zone}")],
+        events=[
+            Event(
+                label="zone_cmd",
+                trigger=CommandTrigger(kind="dm", message_label="hello", zone_label="zone_a"),
+                responses=[AddFlagResponse(flag_label="active", target=TargetTriggeringNode())],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db)
+    eng.handle_position(NODE_ID, *INSIDE_ZONE)
+    eng.handle_message(NODE_ID, "hello", is_dm=True, channel_idx=0)
+    assert db.has_flag("node", NODE_ID, "active")
+
+
+def test_channel_trigger_fires(db):
+    from config import Message
+    cfg = minimal_config(
+        messages=[Message(label="hello", text="hello"),
+                  Message(label="greet_node", text="Hi {node_id}"),
+                  Message(label="greet_zone", text="Zone: {zone}")],
+        events=[
+            Event(
+                label="channel_ev",
+                trigger=CommandTrigger(kind="channel", message_label="hello", channel_label="main"),
+                responses=[AddFlagResponse(flag_label="active", target=TargetTriggeringNode())],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db, channel_map={"main": 0})
+    eng.handle_message(NODE_ID, "hello", is_dm=False, channel_idx=0)
+    assert db.has_flag("node", NODE_ID, "active")
+
+
+# ---------------------------------------------------------------------------
+# Group responses and exceptions
+# ---------------------------------------------------------------------------
+
+def test_add_to_group_response(db):
+    from config import AddToGroupResponse
+    cfg = minimal_config(events=[
+        Event(
+            label="join_ev",
+            trigger=ProximityTrigger(kind="enters_zone", target_label="zone_a"),
+            responses=[AddToGroupResponse(group_label="players", target=TargetTriggeringNode())],
+        )
+    ])
+    eng = make_engine(cfg, db)
+    eng.handle_position(NODE_ID, *OUTSIDE_ZONE)
+    eng.handle_position(NODE_ID, *INSIDE_ZONE)
+    assert db.is_in_group("players", NODE_ID)
+
+
+def test_remove_from_group_response(db):
+    from config import AddToGroupResponse, RemoveFromGroupResponse
+    cfg = minimal_config(events=[
+        Event(
+            label="join_ev",
+            trigger=ProximityTrigger(kind="enters_zone", target_label="zone_a"),
+            responses=[AddToGroupResponse(group_label="players", target=TargetTriggeringNode())],
+        ),
+        Event(
+            label="leave_ev",
+            trigger=ProximityTrigger(kind="leaves_zone", target_label="zone_a"),
+            responses=[RemoveFromGroupResponse(group_label="players", target=TargetTriggeringNode())],
+        ),
+    ])
+    eng = make_engine(cfg, db)
+    eng.handle_position(NODE_ID, *OUTSIDE_ZONE)
+    eng.handle_position(NODE_ID, *INSIDE_ZONE)
+    assert db.is_in_group("players", NODE_ID)
+    eng.handle_position(NODE_ID, *OUTSIDE_ZONE)
+    assert not db.is_in_group("players", NODE_ID)
+
+
+def test_to_group_target_broadcasts(db):
+    from config import AddToGroupResponse, NodeDef
+    cfg = minimal_config(
+        nodes=[
+            NodeDef(label="node_a", node_id=NODE_ID, initial_flags=[]),
+            NodeDef(label="node_b", node_id=NODE2_ID, initial_flags=[]),
+        ],
+        events=[
+            Event(
+                label="greet_all",
+                trigger=ProximityTrigger(kind="enters_zone", target_label="zone_a"),
+                responses=[
+                    SendMessageResponse(
+                        message_label="hello",
+                        target=TargetGroup("players"),
+                    )
+                ],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db)
+    db.add_to_group("players", NODE_ID)
+    db.add_to_group("players", NODE2_ID)
+    eng.handle_position(NODE_ID, *OUTSIDE_ZONE)
+    eng.handle_position(NODE_ID, *INSIDE_ZONE)
+    recipients = [node_id for node_id, _ in eng.sent_dms]
+    assert NODE_ID in recipients
+    assert NODE2_ID in recipients
+
+
+def test_group_count_variable(db):
+    from config import Variable, TargetZone
+    cfg = minimal_config(
+        variables=[
+            Variable(label="player_count", scope="global", tracks="group_count", target="players"),
+        ],
+        events=[
+            Event(
+                label="count_check",
+                trigger=VariableThresholdTrigger(variable_label="player_count", operator="gte", value=2),
+                responses=[AddFlagResponse(flag_label="active", target=TargetZone("zone_a"))],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db)
+    db.add_to_group("players", NODE_ID)
+    eng.handle_periodic()
+    assert not db.has_flag("zone", "zone_a", "active")
+
+    db.add_to_group("players", NODE2_ID)
+    eng.handle_periodic()   # global-scope variable threshold fires in periodic
+    assert db.has_flag("zone", "zone_a", "active")
+
+
+def test_node_in_group_exception_blocks(db):
+    from config import AddToGroupResponse
+    cfg = minimal_config(events=[
+        Event(
+            label="join_ev",
+            trigger=ProximityTrigger(kind="enters_zone", target_label="zone_a"),
+            responses=[AddToGroupResponse(group_label="players", target=TargetTriggeringNode())],
+        ),
+        Event(
+            label="gated_ev",
+            trigger=ProximityTrigger(kind="enters_zone", target_label="zone_a"),
+            exceptions=[EventException(kind="node_in_group", group="players")],
+            responses=[AddFlagResponse(flag_label="scored", target=TargetTriggeringNode())],
+        ),
+    ])
+    eng = make_engine(cfg, db)
+    db.add_to_group("players", NODE_ID)  # pre-add so exception fires on first entry
+    eng.handle_position(NODE_ID, *OUTSIDE_ZONE)
+    eng.handle_position(NODE_ID, *INSIDE_ZONE)
+    assert not db.has_flag("node", NODE_ID, "scored")
+
+
+def test_zone_in_group_exception_blocks(db):
+    from config import GroupDef, AddToGroupResponse
+    cfg = minimal_config(
+        groups=[
+            GroupDef(label="players", kind="node"),
+            GroupDef(label="active_zones", kind="zone", initial_members=["zone_a"]),
+        ],
+        events=[
+            Event(
+                label="gated_ev",
+                trigger=ProximityTrigger(kind="enters_zone", target_label="zone_a"),
+                exceptions=[EventException(kind="zone_in_group", group="active_zones", target="zone_a")],
+                responses=[AddFlagResponse(flag_label="active", target=TargetTriggeringNode())],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db)
+    db.apply_initial_groups(cfg)
+    eng.handle_position(NODE_ID, *OUTSIDE_ZONE)
+    eng.handle_position(NODE_ID, *INSIDE_ZONE)
+    assert not db.has_flag("node", NODE_ID, "active")
+
+
+# ---------------------------------------------------------------------------
+# Zone group triggers
+# ---------------------------------------------------------------------------
+
+def _zone_group_config(trigger_kind: str, **event_kwargs):
+    """Helper: config with zone_a and zone_b both in a zone group."""
+    from config import Zone, GroupDef
+    zone_b_points = [
+        (47.020, -122.020),
+        (47.030, -122.020),
+        (47.020, -122.030),
+    ]
+    return minimal_config(
+        zones=[
+            Zone(label="zone_a", points=list(ZONE_POINTS)),
+            Zone(label="zone_b", points=zone_b_points),
+        ],
+        groups=[
+            GroupDef(label="players", kind="node"),
+            GroupDef(label="game_zones", kind="zone", initial_members=["zone_a", "zone_b"]),
+        ],
+        events=[
+            Event(
+                label="group_ev",
+                trigger=ProximityTrigger(kind=trigger_kind, zone_group="game_zones"),
+                responses=[AddFlagResponse(flag_label="active", target=TargetTriggeringNode())],
+                **event_kwargs,
+            )
+        ],
+    )
+
+
+INSIDE_ZONE_B = (47.023, -122.023)  # inside zone_b
+
+
+def test_enters_zone_group_fires(db):
+    cfg = _zone_group_config("enters_zone_group")
+    eng = make_engine(cfg, db)
+    db.apply_initial_groups(cfg)
+    eng.handle_position(NODE_ID, *OUTSIDE_ZONE)
+    eng.handle_position(NODE_ID, *INSIDE_ZONE)  # enters zone_a (in group)
+    assert db.has_flag("node", NODE_ID, "active")
+
+
+def test_enters_zone_group_fires_on_second_zone(db):
+    cfg = _zone_group_config("enters_zone_group")
+    eng = make_engine(cfg, db)
+    db.apply_initial_groups(cfg)
+    eng.handle_position(NODE_ID, *OUTSIDE_ZONE)
+    eng.handle_position(NODE_ID, *INSIDE_ZONE_B)  # enters zone_b (also in group)
+    assert db.has_flag("node", NODE_ID, "active")
+
+
+def test_enters_zone_group_no_fire_outside(db):
+    cfg = _zone_group_config("enters_zone_group")
+    eng = make_engine(cfg, db)
+    db.apply_initial_groups(cfg)
+    eng.handle_position(NODE_ID, *OUTSIDE_ZONE)
+    assert not db.has_flag("node", NODE_ID, "active")
+
+
+def test_leaves_zone_group_fires(db):
+    cfg = _zone_group_config("leaves_zone_group")
+    eng = make_engine(cfg, db)
+    db.apply_initial_groups(cfg)
+    eng.handle_position(NODE_ID, *INSIDE_ZONE)   # inside
+    eng.handle_position(NODE_ID, *OUTSIDE_ZONE)  # leaves zone_a (in group)
+    assert db.has_flag("node", NODE_ID, "active")
+
+
+def test_in_zone_group_fires(db):
+    cfg = _zone_group_config("in_zone_group")
+    eng = make_engine(cfg, db)
+    db.apply_initial_groups(cfg)
+    eng.handle_position(NODE_ID, *INSIDE_ZONE)
+    assert db.has_flag("node", NODE_ID, "active")
+
+
+def test_in_zone_group_no_fire_outside(db):
+    cfg = _zone_group_config("in_zone_group")
+    eng = make_engine(cfg, db)
+    db.apply_initial_groups(cfg)
+    eng.handle_position(NODE_ID, *OUTSIDE_ZONE)
+    assert not db.has_flag("node", NODE_ID, "active")
+
+
+def test_in_zone_group_on_start_fires(db):
+    from config import Zone, GroupDef, TargetZone
+    cfg = minimal_config(
+        zones=[Zone(label="zone_a", points=list(ZONE_POINTS))],
+        groups=[
+            GroupDef(label="players", kind="node"),
+            GroupDef(label="game_zones", kind="zone", initial_members=["zone_a"]),
+        ],
+        events=[
+            Event(
+                label="start_ev",
+                trigger=ProximityTrigger(kind="in_zone_group_on_start", zone_group="game_zones"),
+                responses=[AddFlagResponse(flag_label="active", target=TargetZone("zone_a"))],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db)
+    db.apply_initial_groups(cfg)
+    eng.handle_position(NODE_ID, *INSIDE_ZONE)
+    eng.handle_periodic()
+    assert db.has_flag("zone", "zone_a", "active")
+
+
+def test_in_zone_group_on_start_no_fire_when_empty(db):
+    cfg = _zone_group_config("in_zone_group_on_start")
+    eng = make_engine(cfg, db)
+    db.apply_initial_groups(cfg)
+    eng.handle_position(NODE_ID, *OUTSIDE_ZONE)
+    eng.handle_periodic()
+    assert not db.has_flag("zone", "zone_a", "active")
+    assert not db.has_flag("node", NODE_ID, "active")
+
+
+def test_command_zone_group_fires_inside(db):
+    from config import Message, Zone, GroupDef
+    cfg = minimal_config(
+        zones=[Zone(label="zone_a", points=list(ZONE_POINTS))],
+        groups=[
+            GroupDef(label="players", kind="node"),
+            GroupDef(label="game_zones", kind="zone", initial_members=["zone_a"]),
+        ],
+        messages=[Message(label="hello", text="hello"),
+                  Message(label="greet_node", text="Hi {node_id}"),
+                  Message(label="greet_zone", text="Zone: {zone}")],
+        events=[
+            Event(
+                label="zone_grp_cmd",
+                trigger=CommandTrigger(kind="dm", message_label="hello", zone_group="game_zones"),
+                responses=[AddFlagResponse(flag_label="active", target=TargetTriggeringNode())],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db)
+    db.apply_initial_groups(cfg)
+    eng.handle_position(NODE_ID, *INSIDE_ZONE)
+    eng.handle_message(NODE_ID, "hello", is_dm=True, channel_idx=0)
+    assert db.has_flag("node", NODE_ID, "active")
+
+
+def test_command_zone_group_no_fire_outside(db):
+    from config import Message, Zone, GroupDef
+    cfg = minimal_config(
+        zones=[Zone(label="zone_a", points=list(ZONE_POINTS))],
+        groups=[
+            GroupDef(label="players", kind="node"),
+            GroupDef(label="game_zones", kind="zone", initial_members=["zone_a"]),
+        ],
+        messages=[Message(label="hello", text="hello"),
+                  Message(label="greet_node", text="Hi {node_id}"),
+                  Message(label="greet_zone", text="Zone: {zone}")],
+        events=[
+            Event(
+                label="zone_grp_cmd",
+                trigger=CommandTrigger(kind="dm", message_label="hello", zone_group="game_zones"),
+                responses=[AddFlagResponse(flag_label="active", target=TargetTriggeringNode())],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db)
+    db.apply_initial_groups(cfg)
+    eng.handle_position(NODE_ID, *OUTSIDE_ZONE)
+    eng.handle_message(NODE_ID, "hello", is_dm=True, channel_idx=0)
+    assert not db.has_flag("node", NODE_ID, "active")
