@@ -1,5 +1,6 @@
 """Event trigger evaluation and response execution for expLoRation."""
 from __future__ import annotations
+import json
 import logging
 import queue
 import random
@@ -8,7 +9,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
-from typing import Any
+from typing import IO, Any
 
 import math
 import secrets
@@ -154,11 +155,21 @@ Context = NodeContext | MessageContext | PeriodicContext | ExpiryContext | Waypo
 # ---------------------------------------------------------------------------
 
 class Engine:
-    def __init__(self, config: GameConfig, state: GameState, interface: Any, send_delay: float = 1.5):
+    def __init__(
+        self,
+        config: GameConfig,
+        state: GameState,
+        interface: Any,
+        send_delay: float = 1.5,
+        replay_log: IO[str] | None = None,
+        replay_log_verbose: bool = False,
+    ):
         self.config = config
         self.state = state
         self.interface = interface
         self.send_delay = send_delay
+        self.replay_log = replay_log
+        self.replay_log_verbose = replay_log_verbose
         self._group_kind: dict[str, str] = {g.label: g.kind for g in config.groups}
         self._mutable_var_defs: dict[str, MutableVariableDef] = {
             mv.label: mv for mv in config.mutable_variables
@@ -174,6 +185,67 @@ class Engine:
         # Tracks which zone labels each node is currently inside, for transition detection
         self._node_zones: dict[str, frozenset[str]] = {}
         self._suppress_messages = False
+
+    # ------------------------------------------------------------------
+    # Replay log helpers
+    # ------------------------------------------------------------------
+
+    def _write_replay(self, record: dict) -> None:
+        if self.replay_log is None:
+            return
+        self.replay_log.write(json.dumps(record, default=str) + "\n")
+        self.replay_log.flush()
+
+    def _ctx_fields(self, ctx: Context) -> dict:
+        d: dict = {"context_type": type(ctx).__name__}
+        node_id = getattr(ctx, "node_id", None)
+        if node_id:
+            d["node_id"] = node_id
+        if isinstance(ctx, NodeContext):
+            if ctx.entered_zones:
+                d["entered_zones"] = sorted(ctx.entered_zones)
+            if ctx.left_zones:
+                d["left_zones"] = sorted(ctx.left_zones)
+        elif isinstance(ctx, MessageContext):
+            if ctx.channel_label:
+                d["channel"] = ctx.channel_label
+        elif isinstance(ctx, ExpiryContext):
+            d["target_kind"] = ctx.target_kind
+            if ctx.flag_label:
+                d["flag_label"] = ctx.flag_label
+        elif isinstance(ctx, WaypointReceivedContext):
+            d["waypoint_name"] = ctx.waypoint_name
+            d["waypoint_lat"] = round(ctx.waypoint_lat, 5)
+            d["waypoint_lon"] = round(ctx.waypoint_lon, 5)
+        return d
+
+    @staticmethod
+    def _trigger_typename(trigger) -> str:
+        if hasattr(trigger, "kind"):
+            return trigger.kind
+        name = type(trigger).__name__
+        if name.endswith("Trigger"):
+            name = name[:-7]
+        return re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", name).lower()
+
+    @staticmethod
+    def _resp_typename(resp) -> str:
+        name = type(resp).__name__
+        if name.endswith("Response"):
+            name = name[:-8]
+        return re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", name).lower()
+
+    def _log_skip(self, event: Event, ctx: Context, reason: str) -> None:
+        if not self.replay_log_verbose:
+            return
+        self._write_replay({
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "type": "skip",
+            "event": event.label,
+            "trigger_type": self._trigger_typename(event.trigger),
+            "skip_reason": reason,
+            **self._ctx_fields(ctx),
+        })
 
     def seed_node_location(self, node_id: str, lat: float, lon: float) -> None:
         """Process a node's starting location through the normal event pipeline but suppress all outbound messages."""
@@ -313,6 +385,7 @@ class Engine:
 
     def _should_fire(self, event: Event, ctx: Context) -> bool:
         if self.state.is_event_disabled(event.label):
+            self._log_skip(event, ctx, "disabled")
             return False
 
         node_id = ctx.node_id if isinstance(ctx, (NodeContext, MessageContext, ExpiryContext)) else None
@@ -322,17 +395,21 @@ class Engine:
             times, last = self.state.get_event_state(event.label)
 
         if event.max_triggers is not None and times >= event.max_triggers:
+            self._log_skip(event, ctx, "max_triggers")
             return False
 
         if event.reset_mins is not None and last is not None:
             cutoff = last + timedelta(minutes=event.reset_mins)
             if datetime.now(timezone.utc) < cutoff:
+                self._log_skip(event, ctx, "cooldown")
                 return False
 
         if not self._check_trigger(event, ctx):
             return False
 
-        if self._check_exceptions(event, ctx):
+        exc_reason = self._check_exceptions(event, ctx)
+        if exc_reason:
+            self._log_skip(event, ctx, exc_reason)
             return False
 
         return True
@@ -592,19 +669,23 @@ class Engine:
         fn = ops.get(operator)
         return fn(current, threshold) if fn else False
 
-    def _check_exceptions(self, event: Event, ctx: Context) -> bool:
+    def _check_exceptions(self, event: Event, ctx: Context) -> str | None:
+        """Returns the blocking exception reason string, or None if no exception fires."""
         node_id = ctx.node_id if isinstance(ctx, (NodeContext, MessageContext, ExpiryContext)) else None
         # Evaluate deterministic exceptions first
         for exc in event.exceptions:
             if exc.kind == "random_skip":
                 continue
             if self._exception_matches(exc, node_id, ctx):
-                return True
+                reason = f"exception:{exc.kind}"
+                if exc.flag:
+                    reason += f":{exc.flag}"
+                return reason
         # Roll random_skip only if all deterministic exceptions passed
         for exc in event.exceptions:
             if exc.kind == "random_skip" and self._exception_matches(exc, node_id, ctx):
-                return True
-        return False
+                return "exception:random_skip"
+        return None
 
     def _exception_matches(self, exc: EventException, node_id: str | None, ctx: Context) -> bool:
         kind = exc.kind
@@ -736,6 +817,17 @@ class Engine:
         node_id = ctx.node_id if isinstance(ctx, (NodeContext, MessageContext, ExpiryContext, WaypointReceivedContext)) else None
         if event.trigger_per_node and node_id is not None:
             self.state.increment_node_event_triggers(event.label, node_id)
+        if self.replay_log is not None:
+            times, _ = self.state.get_event_state(event.label)
+            self._write_replay({
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "type": "fire",
+                "event": event.label,
+                "trigger_type": self._trigger_typename(event.trigger),
+                "responses": [self._resp_typename(r) for r in event.responses],
+                "fire_number": times,
+                **self._ctx_fields(ctx),
+            })
 
     def _execute_response(self, resp, ctx: Context) -> None:
         node_id = ctx.node_id if isinstance(ctx, (NodeContext, MessageContext, ExpiryContext, WaypointReceivedContext)) else None

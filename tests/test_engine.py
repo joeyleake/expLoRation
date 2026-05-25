@@ -4,7 +4,7 @@ from __future__ import annotations
 import pytest
 
 from config import (
-    GameConfig, Event, Variable, Message,
+    GameConfig, Event, Variable, Message, FlagDef,
     ProximityTrigger, CommandTrigger, VariableThresholdTrigger,
     SendMessageResponse, SendAlertResponse, AddFlagResponse, RemoveFlagResponse,
     RequestLocationResponse, RequestTelemetryResponse,
@@ -2250,3 +2250,120 @@ def test_delete_mesh_waypoint_use_triggering_waypoint(db):
     eng.handle_periodic()
     eng._send_queue.join()
     assert eng.interface.deleteWaypoint.called
+
+
+# ---------------------------------------------------------------------------
+# Replay log
+# ---------------------------------------------------------------------------
+
+def _replay_records(log_io) -> list[dict]:
+    import json
+    return [json.loads(line) for line in log_io.getvalue().splitlines() if line.strip()]
+
+
+def _enter_zone_event(label="ev", max_triggers=None, exceptions=None):
+    return Event(
+        label=label,
+        trigger=ProximityTrigger(kind="enters_zone", target_label="zone_a"),
+        responses=[SendMessageResponse(message_label="hello", target=TargetChannel(channel_label="main"))],
+        max_triggers=max_triggers,
+        exceptions=exceptions or [],
+    )
+
+
+def test_replay_log_records_fire(db):
+    import io
+    cfg = minimal_config(events=[_enter_zone_event()])
+    log_io = io.StringIO()
+    eng = make_engine(cfg, db, channel_map={"main": 0})
+    eng.replay_log = log_io
+    db.update_node_location(NODE_ID, *OUTSIDE_ZONE)
+    eng.handle_position(NODE_ID, *INSIDE_ZONE)
+    records = _replay_records(log_io)
+    fires = [r for r in records if r["type"] == "fire"]
+    assert len(fires) == 1
+    assert fires[0]["event"] == "ev"
+    assert fires[0]["node_id"] == NODE_ID
+    assert fires[0]["fire_number"] == 1
+    assert "send_message" in fires[0]["responses"]
+
+
+def test_replay_log_correct_trigger_type(db):
+    import io
+    cfg = minimal_config(events=[_enter_zone_event()])
+    log_io = io.StringIO()
+    eng = make_engine(cfg, db, channel_map={"main": 0})
+    eng.replay_log = log_io
+    db.update_node_location(NODE_ID, *OUTSIDE_ZONE)
+    eng.handle_position(NODE_ID, *INSIDE_ZONE)
+    fires = [r for r in _replay_records(log_io) if r["type"] == "fire"]
+    assert fires[0]["trigger_type"] == "enters_zone"
+
+
+def test_replay_log_increments_fire_number(db):
+    import io
+    cfg = minimal_config(events=[_enter_zone_event()])
+    log_io = io.StringIO()
+    eng = make_engine(cfg, db, channel_map={"main": 0})
+    eng.replay_log = log_io
+    db.update_node_location(NODE_ID, *OUTSIDE_ZONE)
+    eng.handle_position(NODE_ID, *INSIDE_ZONE)
+    eng.handle_position(NODE_ID, *OUTSIDE_ZONE)
+    eng.handle_position(NODE_ID, *INSIDE_ZONE)
+    fires = [r for r in _replay_records(log_io) if r["type"] == "fire"]
+    assert len(fires) == 2
+    assert fires[0]["fire_number"] == 1
+    assert fires[1]["fire_number"] == 2
+
+
+def test_replay_log_verbose_records_exception_skip(db):
+    import io
+    cfg = minimal_config(
+        flags=[FlagDef(label="excluded"), FlagDef(label="active"), FlagDef(label="scored")],
+        events=[_enter_zone_event(exceptions=[EventException(kind="node_has_flag", flag="excluded")])],
+    )
+    log_io = io.StringIO()
+    eng = make_engine(cfg, db, channel_map={"main": 0})
+    eng.replay_log = log_io
+    eng.replay_log_verbose = True
+    db.add_flag("node", NODE_ID, "excluded")
+    db.update_node_location(NODE_ID, *OUTSIDE_ZONE)
+    eng.handle_position(NODE_ID, *INSIDE_ZONE)
+    skips = [r for r in _replay_records(log_io) if r["type"] == "skip"]
+    assert len(skips) == 1
+    assert skips[0]["skip_reason"] == "exception:node_has_flag:excluded"
+    assert skips[0]["event"] == "ev"
+
+
+def test_replay_log_verbose_records_max_triggers_skip(db):
+    import io
+    cfg = minimal_config(events=[_enter_zone_event(max_triggers=1)])
+    log_io = io.StringIO()
+    eng = make_engine(cfg, db, channel_map={"main": 0})
+    eng.replay_log = log_io
+    eng.replay_log_verbose = True
+    db.update_node_location(NODE_ID, *OUTSIDE_ZONE)
+    eng.handle_position(NODE_ID, *INSIDE_ZONE)   # fires once
+    eng.handle_position(NODE_ID, *OUTSIDE_ZONE)
+    eng.handle_position(NODE_ID, *INSIDE_ZONE)   # skipped — max_triggers
+    records = _replay_records(log_io)
+    fires = [r for r in records if r["type"] == "fire"]
+    skips = [r for r in records if r["type"] == "skip"]
+    assert len(fires) == 1
+    assert any(s["skip_reason"] == "max_triggers" for s in skips)
+
+
+def test_replay_log_no_verbose_no_skips(db):
+    import io
+    cfg = minimal_config(
+        flags=[FlagDef(label="excluded"), FlagDef(label="active"), FlagDef(label="scored")],
+        events=[_enter_zone_event(exceptions=[EventException(kind="node_has_flag", flag="excluded")])],
+    )
+    log_io = io.StringIO()
+    eng = make_engine(cfg, db, channel_map={"main": 0})
+    eng.replay_log = log_io
+    eng.replay_log_verbose = False
+    db.add_flag("node", NODE_ID, "excluded")
+    db.update_node_location(NODE_ID, *OUTSIDE_ZONE)
+    eng.handle_position(NODE_ID, *INSIDE_ZONE)
+    assert not any(r["type"] == "skip" for r in _replay_records(log_io))

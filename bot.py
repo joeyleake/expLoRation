@@ -340,6 +340,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--verbose", action="store_true",
                    help="Print all location updates with zone proximity")
     p.add_argument("--debug", action="store_true", help="Enable debug logging")
+    p.add_argument("--replay-log", metavar="PATH",
+                   help="Append a JSONL record for every event that fires")
+    p.add_argument("--replay-log-verbose", metavar="PATH",
+                   help="Like --replay-log but also records events skipped by exceptions or limits")
     return p.parse_args()
 
 
@@ -374,6 +378,22 @@ def main() -> None:
     state.init_mutable_variables(config)
     state.init_event_states(config)
 
+    replay_log_path = args.replay_log_verbose or args.replay_log
+    replay_log_verbose = bool(args.replay_log_verbose)
+    replay_log_file = None
+    if replay_log_path:
+        replay_log_file = open(replay_log_path, "a")  # noqa: SIM115
+        replay_log_file.write(
+            json.dumps({
+                "ts": datetime.now().astimezone().isoformat(),
+                "type": "session_start",
+                "config": args.config,
+                "verbose": replay_log_verbose,
+            }) + "\n"
+        )
+        replay_log_file.flush()
+        log.info("Replay log: %s (verbose=%s)", replay_log_path, replay_log_verbose)
+
     # The meshtastic library dispatches via a publishingThread that queues pub.sendMessage
     # calls — this breaks pypubsub v4 parent-topic propagation, so subscribing to the
     # generic "meshtastic.receive" parent never fires.  Subscribe to the exact subtopics
@@ -383,7 +403,12 @@ def main() -> None:
     # constructor returns so it's set before any event response runs.
     #
     # connection.established fires inside __init__() so we call on_connection directly.
-    engine = Engine(config, state, None, send_delay=args.send_delay)
+    engine = Engine(
+        config, state, None,
+        send_delay=args.send_delay,
+        replay_log=replay_log_file,
+        replay_log_verbose=replay_log_verbose,
+    )
 
     def _receive(packet, interface):
         on_receive(packet, interface, engine, args.verbose)
@@ -444,6 +469,14 @@ def main() -> None:
         log.info("Shutting down")
     finally:
         _close_quietly(interface)
+        if replay_log_file:
+            replay_log_file.write(
+                json.dumps({
+                    "ts": datetime.now().astimezone().isoformat(),
+                    "type": "session_end",
+                }) + "\n"
+            )
+            replay_log_file.close()
 
 
 if __name__ == "__main__":
