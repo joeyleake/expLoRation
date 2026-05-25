@@ -196,6 +196,27 @@ def on_receive(packet: dict, interface, engine: Engine, verbose: bool = False) -
             log.debug("Message from %s (dm=%s ch=%d): %r", node_id, is_dm, channel_idx, text[:60])
             engine.handle_message(node_id, text, is_dm, channel_idx)
 
+    # --- Waypoints ---
+    elif portnum == "WAYPOINT_APP":
+        waypoint = decoded.get("waypoint", {})
+        # expire=0 with no name = deletion packet from another node — ignore
+        if not waypoint.get("name") and waypoint.get("expire", 0) == 0:
+            return
+        from engine import WaypointReceivedContext
+        lat = waypoint.get("latitudeI", 0) * 1e-7
+        lon = waypoint.get("longitudeI", 0) * 1e-7
+        ctx = WaypointReceivedContext(
+            node_id=node_id,
+            waypoint_name=waypoint.get("name", ""),
+            waypoint_description=waypoint.get("description", ""),
+            waypoint_lat=lat,
+            waypoint_lon=lon,
+            waypoint_expire=waypoint.get("expire", 0),
+            mesh_waypoint_id=waypoint.get("id"),
+        )
+        log.debug("Waypoint received from %s: %r", node_id, waypoint.get("name", ""))
+        engine.handle_waypoint_received(ctx)
+
 
 _MODEM_PRESET_NAMES = {
     0: "LONG_FAST", 1: "LONG_SLOW", 2: "VERY_LONG_SLOW", 3: "MEDIUM_SLOW",
@@ -253,6 +274,24 @@ def on_connection(interface, engine: Engine, config) -> None:
         engine.seed_node_location(node_id, lat, lon)
     if located:
         log.info("Seeded %d node locations from device", len(located))
+
+
+# ---------------------------------------------------------------------------
+# Connection helpers
+# ---------------------------------------------------------------------------
+
+def _interface_alive(interface) -> bool:
+    """Return False if the interface reader thread has exited (connection dropped)."""
+    reader = getattr(interface, "_reader", None)
+    return reader is None or reader.is_alive()
+
+
+def _close_quietly(interface) -> None:
+    """Close interface, suppressing errors from an already-dead connection."""
+    try:
+        interface.close()
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -354,19 +393,27 @@ def main() -> None:
         "meshtastic.receive.position",   # POSITION_APP
         "meshtastic.receive.mapreport",  # MAP_REPORT_APP
         "meshtastic.receive.data.ATAK_PLUGIN",  # ATAK_PLUGIN (no registered handler)
+        "meshtastic.receive.waypoint",   # WAYPOINT_APP
     ):
         pub.subscribe(_receive, _topic)
 
-    if args.host:
-        log.info("Connecting via TCP to %s:%d", args.host, args.tcp_port)
-        interface = meshtastic.tcp_interface.TCPInterface(
-            hostname=args.host, portNumber=args.tcp_port
-        )
-    else:
-        log.info("Connecting via serial port %s", args.port or "(auto-detect)")
-        interface = meshtastic.serial_interface.SerialInterface(devPath=args.port)
-    engine.interface = interface
-    on_connection(interface, engine, config)
+    _RECONNECT_DELAYS = (5, 10, 30, 60, 120)
+
+    def _connect() -> meshtastic.tcp_interface.TCPInterface | meshtastic.serial_interface.SerialInterface:
+        engine.channel_index_map.clear()
+        if args.host:
+            log.info("Connecting via TCP to %s:%d", args.host, args.tcp_port)
+            iface = meshtastic.tcp_interface.TCPInterface(
+                hostname=args.host, portNumber=args.tcp_port
+            )
+        else:
+            log.info("Connecting via serial port %s", args.port or "(auto-detect)")
+            iface = meshtastic.serial_interface.SerialInterface(devPath=args.port)
+        engine.interface = iface
+        on_connection(iface, engine, config)
+        return iface
+
+    interface = _connect()
 
     threading.Thread(target=_periodic_loop, args=(engine, args.periodic), daemon=True).start()
 
@@ -376,13 +423,27 @@ def main() -> None:
         ).start()
 
     log.info("Bot running. Press Ctrl+C to stop.")
+    reconnect_attempt = 0
     try:
         while True:
             time.sleep(1)
+            if not _interface_alive(interface):
+                log.warning("Connection lost — will attempt to reconnect")
+                _close_quietly(interface)
+                delay = _RECONNECT_DELAYS[min(reconnect_attempt, len(_RECONNECT_DELAYS) - 1)]
+                reconnect_attempt += 1
+                log.info("Waiting %ds before reconnect attempt %d...", delay, reconnect_attempt)
+                time.sleep(delay)
+                try:
+                    interface = _connect()
+                    reconnect_attempt = 0
+                    log.info("Reconnected successfully")
+                except Exception:
+                    log.exception("Reconnect attempt %d failed — will retry", reconnect_attempt)
     except KeyboardInterrupt:
         log.info("Shutting down")
     finally:
-        interface.close()
+        _close_quietly(interface)
 
 
 if __name__ == "__main__":

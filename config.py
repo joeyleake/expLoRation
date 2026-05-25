@@ -142,6 +142,12 @@ class WaypointExpiryTrigger:
     had_flag: str | None = None  # optional — only fire for waypoints that had this flag
 
 
+@dataclass
+class WaypointReceivedTrigger:
+    from_flag: str | None = None       # only fire if sending node has this flag
+    name_contains: str | None = None   # only fire if waypoint name contains this substring (case-insensitive)
+
+
 # ---------------------------------------------------------------------------
 # Response targets
 # ---------------------------------------------------------------------------
@@ -334,6 +340,13 @@ class WithNodeResponse:
 class CreateWaypointResponse:
     expiry_mins: float | None = None
     initial_flags: list[str] = field(default_factory=list)
+    # Optional: also push to the Meshtastic mesh map
+    mesh_name: str | None = None
+    mesh_description: str = ""
+    mesh_icon: int = 0
+    mesh_channel: str | None = None        # channel label — broadcast to channel
+    mesh_to_triggering_node: bool = False  # DM to triggering node
+    mesh_label: str | None = None          # store for label-based deletion later
 
 
 @dataclass
@@ -349,6 +362,24 @@ class RemoveDynamicWaypointFlagResponse:
 @dataclass
 class DestroyWaypointResponse:
     pass
+
+
+@dataclass
+class BroadcastWaypointResponse:
+    name: str
+    target: "Target"
+    description: str = ""
+    icon: int = 0
+    expiry_mins: float | None = None
+    lat: float | None = None
+    lon: float | None = None
+    label: str | None = None
+
+
+@dataclass
+class DeleteMeshWaypointResponse:
+    label: str | None = None
+    use_triggering_waypoint: bool = False
 
 
 Response = (
@@ -371,6 +402,8 @@ Response = (
     | AddDynamicWaypointFlagResponse
     | RemoveDynamicWaypointFlagResponse
     | DestroyWaypointResponse
+    | BroadcastWaypointResponse
+    | DeleteMeshWaypointResponse
 )
 
 
@@ -398,7 +431,7 @@ class EventException:
 @dataclass
 class Event:
     label: str
-    trigger: ProximityTrigger | TimedTrigger | CommandTrigger | VariableThresholdTrigger | FlagExpiryTrigger | WaypointExpiryTrigger
+    trigger: ProximityTrigger | TimedTrigger | CommandTrigger | VariableThresholdTrigger | FlagExpiryTrigger | WaypointExpiryTrigger | WaypointReceivedTrigger
     responses: list[Response]
     exceptions: list[EventException] = field(default_factory=list)
     max_triggers: int | None = None
@@ -516,6 +549,30 @@ def _parse_response(raw: dict) -> Response:
         return CreateWaypointResponse(
             expiry_mins=float(raw["expiry_mins"]) if "expiry_mins" in raw else None,
             initial_flags=raw.get("initial_flags", []),
+            mesh_name=raw.get("mesh_name"),
+            mesh_description=raw.get("mesh_description", ""),
+            mesh_icon=int(raw.get("mesh_icon", 0)),
+            mesh_channel=raw.get("mesh_channel"),
+            mesh_to_triggering_node=bool(raw.get("mesh_to_triggering_node", False)),
+            mesh_label=raw.get("mesh_label"),
+        )
+    if kind == "broadcast_waypoint":
+        if "name" not in raw:
+            raise ConfigError("broadcast_waypoint requires 'name'")
+        return BroadcastWaypointResponse(
+            name=raw["name"],
+            target=_parse_target(raw),
+            description=raw.get("description", ""),
+            icon=int(raw.get("icon", 0)),
+            expiry_mins=float(raw["expiry_mins"]) if "expiry_mins" in raw else None,
+            lat=float(raw["lat"]) if "lat" in raw else None,
+            lon=float(raw["lon"]) if "lon" in raw else None,
+            label=raw.get("label"),
+        )
+    if kind == "delete_mesh_waypoint":
+        return DeleteMeshWaypointResponse(
+            label=raw.get("label"),
+            use_triggering_waypoint=bool(raw.get("use_triggering_waypoint", False)),
         )
     if kind == "add_waypoint_flag":
         return AddDynamicWaypointFlagResponse(flag_label=raw["flag_label"])
@@ -564,6 +621,11 @@ def _parse_trigger(raw: dict):
     if kind == "waypoint_expired":
         return WaypointExpiryTrigger(
             had_flag=raw.get("had_flag"),
+        )
+    if kind == "waypoint_received":
+        return WaypointReceivedTrigger(
+            from_flag=raw.get("from_flag"),
+            name_contains=raw.get("name_contains"),
         )
     raise ConfigError(f"Unknown trigger type: {kind!r}")
 
@@ -842,6 +904,10 @@ def _validate(cfg: GameConfig) -> None:
             if t.had_flag is not None:
                 _check_label(t.had_flag, flag_labels, f"{ctx} trigger")
 
+        elif isinstance(t, WaypointReceivedTrigger):
+            if t.from_flag is not None:
+                _check_label(t.from_flag, flag_labels, f"{ctx} trigger waypoint_received from_flag")
+
         # Whether the trigger provides a live dynamic waypoint ID (for add/remove_waypoint_flag)
         _is_dynamic_waypoint_trigger = (
             isinstance(t, ProximityTrigger)
@@ -874,8 +940,36 @@ def _validate(cfg: GameConfig) -> None:
                     raise ConfigError(
                         f"{ctx}: to_triggering_node is not valid for this trigger type (no node context)"
                     )
-            if isinstance(resp, CreateWaypointResponse) and not _has_node_context:
-                raise ConfigError(f"{ctx}: create_waypoint requires a trigger that provides node context")
+            if isinstance(resp, CreateWaypointResponse):
+                if not _has_node_context:
+                    raise ConfigError(f"{ctx}: create_waypoint requires a trigger that provides node context")
+                if resp.mesh_name is not None:
+                    if len(resp.mesh_name) > 30:
+                        raise ConfigError(f"{ctx}: create_waypoint mesh_name exceeds 30-character Meshtastic limit")
+                    if len(resp.mesh_description) > 100:
+                        raise ConfigError(f"{ctx}: create_waypoint mesh_description exceeds 100-character Meshtastic limit")
+                    if resp.mesh_channel and resp.mesh_to_triggering_node:
+                        raise ConfigError(f"{ctx}: create_waypoint mesh_channel and mesh_to_triggering_node are mutually exclusive")
+                    if not resp.mesh_channel and not resp.mesh_to_triggering_node:
+                        raise ConfigError(f"{ctx}: create_waypoint with mesh_name requires mesh_channel or mesh_to_triggering_node")
+                    if resp.mesh_channel:
+                        _check_label(resp.mesh_channel, channel_labels, f"{ctx} create_waypoint mesh_channel")
+            if isinstance(resp, BroadcastWaypointResponse):
+                if len(resp.name) > 30:
+                    raise ConfigError(f"{ctx}: broadcast_waypoint name exceeds 30-character Meshtastic limit")
+                if len(resp.description) > 100:
+                    raise ConfigError(f"{ctx}: broadcast_waypoint description exceeds 100-character Meshtastic limit")
+                if (resp.lat is None) != (resp.lon is None):
+                    raise ConfigError(f"{ctx}: broadcast_waypoint lat and lon must both be provided or both omitted")
+                if resp.expiry_mins is not None and resp.expiry_mins <= 0:
+                    raise ConfigError(f"{ctx}: broadcast_waypoint expiry_mins must be positive")
+                if resp.lat is None and not _has_node_context:
+                    raise ConfigError(f"{ctx}: broadcast_waypoint with no explicit lat/lon requires a trigger that provides node context")
+            if isinstance(resp, DeleteMeshWaypointResponse):
+                if not resp.label and not resp.use_triggering_waypoint:
+                    raise ConfigError(f"{ctx}: delete_mesh_waypoint requires 'label' or 'use_triggering_waypoint'")
+                if resp.label and resp.use_triggering_waypoint:
+                    raise ConfigError(f"{ctx}: delete_mesh_waypoint 'label' and 'use_triggering_waypoint' are mutually exclusive")
             if isinstance(resp, DestroyWaypointResponse):
                 if not _is_dynamic_waypoint_trigger:
                     raise ConfigError(

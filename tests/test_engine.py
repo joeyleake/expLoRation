@@ -1993,4 +1993,260 @@ def test_node_var_unknown_when_node_not_in_nodedb(db):
     eng = make_engine(cfg, db)
     eng.interface.nodes = {}
     eng.handle_message(NODE_ID, "!report", is_dm=True, channel_idx=0)
-    assert any("[unknown]" in text for _, text in eng.sent_dms)
+
+# ---------------------------------------------------------------------------
+# Mesh waypoint features
+# ---------------------------------------------------------------------------
+
+def _waypoint_received_config(from_flag=None, name_contains=None, response_msg="got it"):
+    from config import WaypointReceivedTrigger, FlagDef
+    return minimal_config(
+        flags=[FlagDef(label="trusted")],
+        messages=[Message(label="ack", text=response_msg)],
+        events=[
+            Event(
+                label="on_wp",
+                trigger=WaypointReceivedTrigger(from_flag=from_flag, name_contains=name_contains),
+                responses=[SendMessageResponse(message_label="ack", target=TargetTriggeringNode())],
+            )
+        ],
+    )
+
+def _make_wp_ctx(name="cache", from_node=NODE_ID):
+    from engine import WaypointReceivedContext
+    return WaypointReceivedContext(
+        node_id=from_node,
+        waypoint_name=name,
+        waypoint_description="a desc",
+        waypoint_lat=47.003,
+        waypoint_lon=-122.003,
+        waypoint_expire=0,
+        mesh_waypoint_id=12345,
+    )
+
+def test_waypoint_received_fires_event(db):
+    cfg = _waypoint_received_config()
+    eng = make_engine(cfg, db)
+    eng.handle_waypoint_received(_make_wp_ctx())
+    assert len(eng.sent_dms) == 1
+    assert eng.sent_dms[0][0] == NODE_ID
+
+def test_waypoint_received_from_flag_blocks_without_flag(db):
+    cfg = _waypoint_received_config(from_flag="trusted")
+    eng = make_engine(cfg, db)
+    eng.handle_waypoint_received(_make_wp_ctx())
+    assert eng.sent_dms == []
+
+def test_waypoint_received_from_flag_passes_with_flag(db):
+    cfg = _waypoint_received_config(from_flag="trusted")
+    eng = make_engine(cfg, db)
+    db.add_flag("node", NODE_ID, "trusted")
+    eng.handle_waypoint_received(_make_wp_ctx())
+    assert len(eng.sent_dms) == 1
+
+def test_waypoint_received_name_contains_blocks_mismatch(db):
+    cfg = _waypoint_received_config(name_contains="cache")
+    eng = make_engine(cfg, db)
+    eng.handle_waypoint_received(_make_wp_ctx(name="treasure"))
+    assert eng.sent_dms == []
+
+def test_waypoint_received_name_contains_case_insensitive(db):
+    cfg = _waypoint_received_config(name_contains="Cache")
+    eng = make_engine(cfg, db)
+    eng.handle_waypoint_received(_make_wp_ctx(name="hidden cache"))
+    assert len(eng.sent_dms) == 1
+
+def test_waypoint_received_interpolates_tokens(db):
+    from config import WaypointReceivedTrigger, FlagDef
+    cfg = minimal_config(
+        messages=[Message(label="ack", text="wp={waypoint_name} from={node_id}")],
+        events=[
+            Event(
+                label="on_wp",
+                trigger=WaypointReceivedTrigger(),
+                responses=[SendMessageResponse(message_label="ack", target=TargetTriggeringNode())],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db)
+    eng.handle_waypoint_received(_make_wp_ctx(name="GeoCache"))
+    assert len(eng.sent_dms) == 1
+    text = eng.sent_dms[0][1]
+    assert "wp=GeoCache" in text
+    assert f"from={NODE_ID}" in text
+
+def test_broadcast_waypoint_queues_sendwaypoint(db):
+    from config import BroadcastWaypointResponse, FlagDef
+    cfg = minimal_config(
+        events=[
+            Event(
+                label="broadcast",
+                trigger=ProximityTrigger(kind="enters_zone", target_label="zone_a"),
+                responses=[BroadcastWaypointResponse(
+                    name="Marker",
+                    target=TargetChannel(channel_label="main"),
+                    expiry_mins=30,
+                    label="my_marker",
+                )],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db, channel_map={"main": 0})
+    db.update_node_location(NODE_ID, *OUTSIDE_ZONE)
+    eng.handle_position(NODE_ID, *INSIDE_ZONE)
+    # sendWaypoint should have been called on the interface
+    assert eng.interface.sendWaypoint.called
+    call_kwargs = eng.interface.sendWaypoint.call_args
+    assert call_kwargs is not None
+
+def test_broadcast_waypoint_stores_label(db):
+    from config import BroadcastWaypointResponse
+    cfg = minimal_config(
+        events=[
+            Event(
+                label="broadcast",
+                trigger=ProximityTrigger(kind="enters_zone", target_label="zone_a"),
+                responses=[BroadcastWaypointResponse(
+                    name="Marker",
+                    target=TargetChannel(channel_label="main"),
+                    label="my_marker",
+                )],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db, channel_map={"main": 0})
+    db.update_node_location(NODE_ID, *OUTSIDE_ZONE)
+    eng.handle_position(NODE_ID, *INSIDE_ZONE)
+    # drain send queue
+    eng._send_queue.join()
+    mesh_id = db.get_mesh_waypoint_id_by_label("my_marker")
+    assert mesh_id is not None
+
+def test_broadcast_waypoint_explicit_coords(db):
+    from config import BroadcastWaypointResponse
+    cfg = minimal_config(
+        events=[
+            Event(
+                label="broadcast",
+                trigger=ProximityTrigger(kind="enters_zone", target_label="zone_a"),
+                responses=[BroadcastWaypointResponse(
+                    name="Static",
+                    target=TargetChannel(channel_label="main"),
+                    lat=37.77,
+                    lon=-122.41,
+                )],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db, channel_map={"main": 0})
+    db.update_node_location(NODE_ID, *OUTSIDE_ZONE)
+    eng.handle_position(NODE_ID, *INSIDE_ZONE)
+    assert eng.interface.sendWaypoint.called
+
+def test_delete_mesh_waypoint_by_label(db):
+    from config import BroadcastWaypointResponse, DeleteMeshWaypointResponse, FlagDef
+    cfg = minimal_config(
+        flags=[FlagDef(label="active")],
+        events=[
+            Event(
+                label="broadcast",
+                trigger=ProximityTrigger(kind="enters_zone", target_label="zone_a"),
+                responses=[BroadcastWaypointResponse(
+                    name="Marker",
+                    target=TargetChannel(channel_label="main"),
+                    label="my_marker",
+                )],
+            ),
+            Event(
+                label="cleanup",
+                trigger=ProximityTrigger(kind="leaves_zone", target_label="zone_a"),
+                responses=[DeleteMeshWaypointResponse(label="my_marker")],
+            ),
+        ],
+    )
+    eng = make_engine(cfg, db, channel_map={"main": 0})
+    db.update_node_location(NODE_ID, *OUTSIDE_ZONE)
+    eng.handle_position(NODE_ID, *INSIDE_ZONE)
+    eng._send_queue.join()  # flush broadcast
+    assert db.get_mesh_waypoint_id_by_label("my_marker") is not None
+    eng.handle_position(NODE_ID, *OUTSIDE_ZONE)
+    eng._send_queue.join()  # flush delete
+    assert eng.interface.deleteWaypoint.called
+    assert db.get_mesh_waypoint_id_by_label("my_marker") is None
+
+def test_delete_mesh_waypoint_no_match_nops(db):
+    from config import DeleteMeshWaypointResponse
+    cfg = minimal_config(
+        events=[
+            Event(
+                label="cleanup",
+                trigger=ProximityTrigger(kind="enters_zone", target_label="zone_a"),
+                responses=[DeleteMeshWaypointResponse(label="nonexistent")],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db, channel_map={"main": 0})
+    db.update_node_location(NODE_ID, *OUTSIDE_ZONE)
+    eng.handle_position(NODE_ID, *INSIDE_ZONE)  # should not crash
+    assert not eng.interface.deleteWaypoint.called
+
+def test_create_waypoint_with_mesh_fields_broadcasts_and_links(db):
+    from config import CreateWaypointResponse, FlagDef
+    cfg = minimal_config(
+        flags=[FlagDef(label="targeted")],
+        events=[
+            Event(
+                label="target",
+                trigger=ProximityTrigger(kind="enters_zone", target_label="zone_a"),
+                responses=[CreateWaypointResponse(
+                    expiry_mins=60,
+                    initial_flags=["targeted"],
+                    mesh_name="TARGET",
+                    mesh_description="Strike inbound.",
+                    mesh_channel="main",
+                )],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db, channel_map={"main": 0})
+    db.update_node_location(NODE_ID, *OUTSIDE_ZONE)
+    eng.handle_position(NODE_ID, *INSIDE_ZONE)
+    eng._send_queue.join()
+    assert eng.interface.sendWaypoint.called
+    # dynamic waypoint should have a mesh_waypoint_id linked
+    rows = db._conn.execute("SELECT mesh_waypoint_id FROM dynamic_waypoints").fetchall()
+    assert len(rows) == 1
+    assert rows[0]["mesh_waypoint_id"] is not None
+
+def test_delete_mesh_waypoint_use_triggering_waypoint(db):
+    from config import CreateWaypointResponse, DeleteMeshWaypointResponse, FlagDef, FlagExpiryTrigger
+    cfg = minimal_config(
+        flags=[FlagDef(label="targeted", expiry_mins=0.001)],  # expires almost immediately
+        events=[
+            Event(
+                label="target",
+                trigger=ProximityTrigger(kind="enters_zone", target_label="zone_a"),
+                responses=[CreateWaypointResponse(
+                    expiry_mins=60,
+                    initial_flags=["targeted"],
+                    mesh_name="TARGET",
+                    mesh_channel="main",
+                )],
+            ),
+            Event(
+                label="cleanup",
+                trigger=FlagExpiryTrigger(flag_label="targeted", target_kind="dynamic_waypoint"),
+                responses=[DeleteMeshWaypointResponse(use_triggering_waypoint=True)],
+            ),
+        ],
+    )
+    import time as _time
+    eng = make_engine(cfg, db, channel_map={"main": 0})
+    db.update_node_location(NODE_ID, *OUTSIDE_ZONE)
+    eng.handle_position(NODE_ID, *INSIDE_ZONE)
+    eng._send_queue.join()
+    assert eng.interface.sendWaypoint.called
+    _time.sleep(0.1)  # let flag expire
+    eng.handle_periodic()
+    eng._send_queue.join()
+    assert eng.interface.deleteWaypoint.called

@@ -10,10 +10,13 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
 from typing import Any
 
+import math
+import secrets
+
 from config import (
     GameConfig, Event, Variable, MutableVariableDef,
     ProximityTrigger, TimedTrigger, CommandTrigger, VariableThresholdTrigger,
-    FlagExpiryTrigger, WaypointExpiryTrigger,
+    FlagExpiryTrigger, WaypointExpiryTrigger, WaypointReceivedTrigger,
     SendMessageResponse, SendAlertResponse, AddFlagResponse, RemoveFlagResponse,
     RequestLocationResponse, RequestTelemetryResponse, SetEventTriggersResponse,
     DisableEventResponse, EnableEventResponse,
@@ -22,6 +25,7 @@ from config import (
     RandomOptionsResponse, WithNodeResponse,
     CreateWaypointResponse, AddDynamicWaypointFlagResponse,
     RemoveDynamicWaypointFlagResponse, DestroyWaypointResponse,
+    BroadcastWaypointResponse, DeleteMeshWaypointResponse,
     TargetTriggeringNode, TargetNode, TargetZone, TargetFlag,
     TargetWaypointRadius, TargetAllInZone, TargetAllWithFlag,
     TargetAllNearWaypoint, TargetAllNearTriggeringWaypoint, TargetAllNearNode, TargetChannel, TargetGroup,
@@ -131,7 +135,18 @@ class ExpiryContext:
         return self.target if self.target_kind == "dynamic_waypoint" else None  # type: ignore[return-value]
 
 
-Context = NodeContext | MessageContext | PeriodicContext | ExpiryContext
+@dataclass
+class WaypointReceivedContext:
+    node_id: str | None           # sending node ID (!hex format)
+    waypoint_name: str
+    waypoint_description: str
+    waypoint_lat: float
+    waypoint_lon: float
+    waypoint_expire: int          # Unix timestamp; 0 if no expiry
+    mesh_waypoint_id: int | None
+
+
+Context = NodeContext | MessageContext | PeriodicContext | ExpiryContext | WaypointReceivedContext
 
 
 # ---------------------------------------------------------------------------
@@ -189,6 +204,7 @@ class Engine:
         expired_dynamic_flags = self.state.expire_dynamic_waypoint_flags()
         expired_waypoints = self.state.expire_dynamic_waypoints()
         self._dispatch_expiry_events(expired_flags, expired_dynamic_flags, expired_waypoints)
+        self._delete_expired_mesh_waypoints(self.state.expire_mesh_waypoints())
 
         prev_zones = self._node_zones.get(node_id, frozenset())
         curr_zones = frozenset(
@@ -225,6 +241,7 @@ class Engine:
         expired_dynamic_flags = self.state.expire_dynamic_waypoint_flags()
         expired_waypoints = self.state.expire_dynamic_waypoints()
         self._dispatch_expiry_events(expired_flags, expired_dynamic_flags, expired_waypoints)
+        self._delete_expired_mesh_waypoints(self.state.expire_mesh_waypoints())
         ctx = MessageContext(node_id, text, is_dm, channel_idx)
         for event in self.config.events:
             if isinstance(event.trigger, CommandTrigger):
@@ -243,6 +260,7 @@ class Engine:
         expired_dynamic_flags = self.state.expire_dynamic_waypoint_flags()
         expired_waypoints = self.state.expire_dynamic_waypoints()
         self._dispatch_expiry_events(expired_flags, expired_dynamic_flags, expired_waypoints)
+        self._delete_expired_mesh_waypoints(self.state.expire_mesh_waypoints())
         ctx = PeriodicContext()
         for event in self.config.events:
             if isinstance(event.trigger, TimedTrigger):
@@ -265,6 +283,29 @@ class Engine:
                 if var_def is None or var_def.scope == "global":
                     if self._should_fire(event, ctx):
                         self._fire_event(event, ctx)
+
+    def handle_waypoint_received(self, ctx: WaypointReceivedContext) -> None:
+        expired_flags = self.state.expire_flags()
+        expired_dynamic_flags = self.state.expire_dynamic_waypoint_flags()
+        expired_waypoints = self.state.expire_dynamic_waypoints()
+        self._dispatch_expiry_events(expired_flags, expired_dynamic_flags, expired_waypoints)
+        self._delete_expired_mesh_waypoints(self.state.expire_mesh_waypoints())
+        for event in self.config.events:
+            if isinstance(event.trigger, WaypointReceivedTrigger):
+                if self._should_fire(event, ctx):
+                    self._fire_event(event, ctx)
+
+    def _delete_expired_mesh_waypoints(self, expired_ids: list[int]) -> None:
+        for mesh_wp_id in expired_ids:
+            def _fn(mid=mesh_wp_id):
+                if self.interface is None:
+                    return
+                try:
+                    self.interface.deleteWaypoint(waypoint_id=mid)
+                    log.info("Deleted expired mesh waypoint id=%d", mid)
+                except Exception:
+                    log.warning("Failed to delete expired mesh waypoint id=%d", mid, exc_info=True)
+            self._send_queue.put(_fn)
 
     # ------------------------------------------------------------------
     # Trigger evaluation
@@ -528,6 +569,17 @@ class Engine:
                 return False
             return True
 
+        elif isinstance(t, WaypointReceivedTrigger):
+            if not isinstance(ctx, WaypointReceivedContext):
+                return False
+            if t.from_flag and ctx.node_id:
+                if not self.state.has_flag("node", ctx.node_id, t.from_flag):
+                    return False
+            if t.name_contains:
+                if t.name_contains.lower() not in ctx.waypoint_name.lower():
+                    return False
+            return True
+
         return False
 
     @staticmethod
@@ -681,12 +733,12 @@ class Engine:
             except Exception:
                 log.exception("Error executing response in event %r", event.label)
         self.state.increment_event_triggers(event.label)
-        node_id = ctx.node_id if isinstance(ctx, (NodeContext, MessageContext, ExpiryContext)) else None
+        node_id = ctx.node_id if isinstance(ctx, (NodeContext, MessageContext, ExpiryContext, WaypointReceivedContext)) else None
         if event.trigger_per_node and node_id is not None:
             self.state.increment_node_event_triggers(event.label, node_id)
 
     def _execute_response(self, resp, ctx: Context) -> None:
-        node_id = ctx.node_id if isinstance(ctx, (NodeContext, MessageContext, ExpiryContext)) else None
+        node_id = ctx.node_id if isinstance(ctx, (NodeContext, MessageContext, ExpiryContext, WaypointReceivedContext)) else None
         wp_id = getattr(ctx, "triggering_waypoint_id", None)
         entered_zones = ctx.entered_zones if isinstance(ctx, NodeContext) else frozenset()
         if entered_zones:
@@ -695,12 +747,20 @@ class Engine:
             zone_id = next(iter(self._node_zones[node_id]))
         else:
             zone_id = None
+        extra_tokens: dict[str, str] | None = None
+        if isinstance(ctx, WaypointReceivedContext):
+            extra_tokens = {
+                "waypoint_name": ctx.waypoint_name,
+                "waypoint_description": ctx.waypoint_description,
+                "waypoint_lat": f"{ctx.waypoint_lat:.5f}",
+                "waypoint_lon": f"{ctx.waypoint_lon:.5f}",
+            }
 
         if isinstance(resp, SendMessageResponse):
             message = self._get_message(resp.message_label)
             if message is None:
                 return
-            text = self._interpolate(message.text, node_id, zone_id)
+            text = self._interpolate(message.text, node_id, zone_id, extra_tokens)
             if isinstance(resp.target, TargetChannel):
                 self._send_channel(resp.target.channel_label, text)
             else:
@@ -712,7 +772,7 @@ class Engine:
             message = self._get_message(resp.message_label)
             if message is None:
                 return
-            text = self._interpolate(message.text, node_id, zone_id)
+            text = self._interpolate(message.text, node_id, zone_id, extra_tokens)
             if isinstance(resp.target, TargetChannel):
                 self._send_alert_channel(resp.target.channel_label, text)
             else:
@@ -831,11 +891,60 @@ class Engine:
                 return
             lat, lon = loc
             flag_map = {f.label: f for f in self.config.flags}
-            wp_id = self.state.create_dynamic_waypoint(lat, lon, resp.expiry_mins)
+            new_wp_id = self.state.create_dynamic_waypoint(lat, lon, resp.expiry_mins)
             for flag_label in resp.initial_flags:
                 expiry = flag_map[flag_label].expiry_mins if flag_label in flag_map else None
-                self.state.add_dynamic_waypoint_flag(wp_id, flag_label, expiry)
-            log.info("Created dynamic waypoint %d at %.5f,%.5f flags=%s", wp_id, lat, lon, resp.initial_flags)
+                self.state.add_dynamic_waypoint_flag(new_wp_id, flag_label, expiry)
+            log.info("Created dynamic waypoint %d at %.5f,%.5f flags=%s", new_wp_id, lat, lon, resp.initial_flags)
+            if resp.mesh_name is not None:
+                expire_ts = int(time.time()) + int(resp.expiry_mins * 60) if resp.expiry_mins else 0
+                mesh_wp_id = math.floor(secrets.randbits(32) * math.pow(2, -32) * 1e9)
+                if resp.mesh_channel:
+                    ch_idx = self._resolve_channel_index(resp.mesh_channel)
+                    if ch_idx is None:
+                        log.warning("create_waypoint mesh broadcast: channel %r not mapped", resp.mesh_channel)
+                    else:
+                        from meshtastic import BROADCAST_ADDR as _BCAST
+                        def _fn(n=resp.mesh_name, d=resp.mesh_description, ic=resp.mesh_icon,
+                                ex=expire_ts, wid=mesh_wp_id, la=lat, lo=lon, ci=ch_idx, ba=_BCAST):
+                            if self.interface is None:
+                                return
+                            self.interface.sendWaypoint(
+                                name=n, description=d, icon=ic, expire=ex,
+                                waypoint_id=wid, latitude=la, longitude=lo,
+                                destinationId=ba, channelIndex=ci,
+                            )
+                            log.info("create_waypoint mesh broadcast %r ch%d (id=%d)", n, ci, wid)
+                        self._send_queue.put(_fn)
+                        self.state.set_mesh_waypoint_id_for_dynamic(new_wp_id, mesh_wp_id)
+                        if resp.mesh_label:
+                            self.state.store_mesh_waypoint(
+                                mesh_wp_id, resp.mesh_name, lat, lon,
+                                label=resp.mesh_label, expiry_mins=resp.expiry_mins,
+                            )
+                elif resp.mesh_to_triggering_node and node_id:
+                    try:
+                        dest = int(node_id.lstrip("!"), 16)
+                    except ValueError:
+                        log.warning("create_waypoint mesh broadcast: invalid node_id %r", node_id)
+                    else:
+                        def _fn(n=resp.mesh_name, d=resp.mesh_description, ic=resp.mesh_icon,
+                                ex=expire_ts, wid=mesh_wp_id, la=lat, lo=lon, de=dest):
+                            if self.interface is None:
+                                return
+                            self.interface.sendWaypoint(
+                                name=n, description=d, icon=ic, expire=ex,
+                                waypoint_id=wid, latitude=la, longitude=lo,
+                                destinationId=de, channelIndex=0,
+                            )
+                            log.info("create_waypoint mesh DM %r → !%08x (id=%d)", n, de, wid)
+                        self._send_queue.put(_fn)
+                        self.state.set_mesh_waypoint_id_for_dynamic(new_wp_id, mesh_wp_id)
+                        if resp.mesh_label:
+                            self.state.store_mesh_waypoint(
+                                mesh_wp_id, resp.mesh_name, lat, lon,
+                                label=resp.mesh_label, expiry_mins=resp.expiry_mins,
+                            )
 
         elif isinstance(resp, AddDynamicWaypointFlagResponse):
             wp_id = ctx.triggering_waypoint_id if isinstance(ctx, NodeContext) else None
@@ -862,6 +971,78 @@ class Engine:
                 return
             self.state.destroy_dynamic_waypoint(wp_id)
             log.info("Destroyed dynamic waypoint %d", wp_id)
+
+        elif isinstance(resp, BroadcastWaypointResponse):
+            if resp.lat is not None and resp.lon is not None:
+                lat, lon = resp.lat, resp.lon
+            else:
+                loc = self.state.get_node_location(node_id) if node_id else None
+                if loc is None:
+                    log.warning("broadcast_waypoint: no location for node %s; skipping", node_id)
+                    return
+                lat, lon = loc
+            expire_ts = int(time.time()) + int(resp.expiry_mins * 60) if resp.expiry_mins else 0
+            mesh_wp_id = math.floor(secrets.randbits(32) * math.pow(2, -32) * 1e9)
+            from meshtastic import BROADCAST_ADDR as _BCAST
+            if isinstance(resp.target, TargetChannel):
+                ch_idx = self._resolve_channel_index(resp.target.channel_label)
+                if ch_idx is None:
+                    log.warning("broadcast_waypoint: channel %r not mapped", resp.target.channel_label)
+                    return
+                def _fn(n=resp.name, d=resp.description, ic=resp.icon,
+                        ex=expire_ts, wid=mesh_wp_id, la=lat, lo=lon, ci=ch_idx, ba=_BCAST):
+                    if self.interface is None:
+                        return
+                    self.interface.sendWaypoint(
+                        name=n, description=d, icon=ic, expire=ex,
+                        waypoint_id=wid, latitude=la, longitude=lo,
+                        destinationId=ba, channelIndex=ci,
+                    )
+                    log.info("broadcast_waypoint %r on ch%d (id=%d)", n, ci, wid)
+                self._send_queue.put(_fn)
+            else:
+                node_ids = self._resolve_node_targets(resp.target, node_id, wp_id)
+                for nid in node_ids:
+                    try:
+                        dest = int(nid.lstrip("!"), 16)
+                    except ValueError:
+                        continue
+                    def _fn(n=resp.name, d=resp.description, ic=resp.icon,
+                            ex=expire_ts, wid=mesh_wp_id, la=lat, lo=lon, de=dest):
+                        if self.interface is None:
+                            return
+                        self.interface.sendWaypoint(
+                            name=n, description=d, icon=ic, expire=ex,
+                            waypoint_id=wid, latitude=la, longitude=lo,
+                            destinationId=de, channelIndex=0,
+                        )
+                        log.info("broadcast_waypoint %r DM → !%08x (id=%d)", n, de, wid)
+                    self._send_queue.put(_fn)
+            if resp.label:
+                self.state.store_mesh_waypoint(
+                    mesh_wp_id, resp.name, lat, lon,
+                    label=resp.label, expiry_mins=resp.expiry_mins,
+                )
+            if wp_id is not None:
+                self.state.set_mesh_waypoint_id_for_dynamic(wp_id, mesh_wp_id)
+
+        elif isinstance(resp, DeleteMeshWaypointResponse):
+            mesh_wp_id = None
+            if resp.use_triggering_waypoint and wp_id is not None:
+                mesh_wp_id = self.state.get_mesh_waypoint_id_for_dynamic(wp_id)
+            elif resp.label:
+                mesh_wp_id = self.state.get_mesh_waypoint_id_by_label(resp.label)
+            if mesh_wp_id is None:
+                log.warning("delete_mesh_waypoint: no mesh_waypoint_id found (label=%r, wp=%s)",
+                            resp.label, wp_id)
+                return
+            def _fn(mid=mesh_wp_id):
+                if self.interface is None:
+                    return
+                self.interface.deleteWaypoint(waypoint_id=mid)
+                log.info("delete_mesh_waypoint id=%d", mid)
+            self._send_queue.put(_fn)
+            self.state.delete_mesh_waypoint_record(mesh_wp_id)
 
     # ------------------------------------------------------------------
     # Target resolution
@@ -1075,6 +1256,9 @@ class Engine:
                 log.info("Alert channel[%d] broadcast: %r", i, c[:60])
             self._send_queue.put(_fn)
 
+    def _resolve_channel_index(self, channel_label: str) -> int | None:
+        return self.channel_index_map.get(channel_label)
+
     def _send_channel(self, channel_label: str, text: str) -> None:
         if self._suppress_messages:
             return
@@ -1129,9 +1313,15 @@ class Engine:
     # Config lookups
     # ------------------------------------------------------------------
 
-    def _interpolate(self, text: str, triggering_node_id: str | None, triggering_zone: str | None = None) -> str:
+    def _interpolate(
+        self, text: str, triggering_node_id: str | None,
+        triggering_zone: str | None = None,
+        extra_tokens: dict[str, str] | None = None,
+    ) -> str:
         def replace(m: re.Match) -> str:
             label = m.group(1)
+            if extra_tokens and label in extra_tokens:
+                return extra_tokens[label]
             if label == "node_id":
                 return triggering_node_id or "[unknown]"
             if label == "node_shortname":
