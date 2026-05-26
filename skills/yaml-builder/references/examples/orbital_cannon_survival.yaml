@@ -420,6 +420,7 @@ events:
               - laser_target
             mesh_name: "🎯 TARGET LOCK"
             mesh_description: "Evacuate immediately."
+            mesh_icon: 9762
             mesh_channel: comms
           - type: send_message
             message_label: target_locked

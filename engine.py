@@ -274,8 +274,11 @@ class Engine:
         self.state.update_node_location(node_id, lat, lon)
         expired_flags = self.state.expire_flags()
         expired_dynamic_flags = self.state.expire_dynamic_waypoint_flags()
+        # Dispatch flag expiry events before deleting waypoints so that
+        # to_all_near_triggering_waypoint can still look up waypoint coordinates.
+        self._dispatch_expiry_events(expired_flags, expired_dynamic_flags, [])
         expired_waypoints = self.state.expire_dynamic_waypoints()
-        self._dispatch_expiry_events(expired_flags, expired_dynamic_flags, expired_waypoints)
+        self._dispatch_expiry_events([], [], expired_waypoints)
         self._delete_expired_mesh_waypoints(self.state.expire_mesh_waypoints())
 
         prev_zones = self._node_zones.get(node_id, frozenset())
@@ -311,8 +314,9 @@ class Engine:
     ) -> None:
         expired_flags = self.state.expire_flags()
         expired_dynamic_flags = self.state.expire_dynamic_waypoint_flags()
+        self._dispatch_expiry_events(expired_flags, expired_dynamic_flags, [])
         expired_waypoints = self.state.expire_dynamic_waypoints()
-        self._dispatch_expiry_events(expired_flags, expired_dynamic_flags, expired_waypoints)
+        self._dispatch_expiry_events([], [], expired_waypoints)
         self._delete_expired_mesh_waypoints(self.state.expire_mesh_waypoints())
         ctx = MessageContext(node_id, text, is_dm, channel_idx)
         for event in self.config.events:
@@ -330,8 +334,9 @@ class Engine:
     def handle_periodic(self) -> None:
         expired_flags = self.state.expire_flags()
         expired_dynamic_flags = self.state.expire_dynamic_waypoint_flags()
+        self._dispatch_expiry_events(expired_flags, expired_dynamic_flags, [])
         expired_waypoints = self.state.expire_dynamic_waypoints()
-        self._dispatch_expiry_events(expired_flags, expired_dynamic_flags, expired_waypoints)
+        self._dispatch_expiry_events([], [], expired_waypoints)
         self._delete_expired_mesh_waypoints(self.state.expire_mesh_waypoints())
         ctx = PeriodicContext()
         for event in self.config.events:
@@ -705,7 +710,9 @@ class Engine:
             if exc.target is not None:
                 has = self.state.has_flag("waypoint", exc.target, exc.flag)
             else:
-                wp_id = ctx.triggering_waypoint_id if isinstance(ctx, (NodeContext, ExpiryContext)) else None
+                wp_id = getattr(ctx, "triggering_waypoint_id", None)
+                if wp_id is None and isinstance(ctx, ExpiryContext) and ctx.target_kind == "dynamic_waypoint":
+                    wp_id = ctx.target
                 if wp_id is None:
                     return False
                 has = self.state.has_dynamic_waypoint_flag(wp_id, exc.flag)
@@ -832,6 +839,8 @@ class Engine:
     def _execute_response(self, resp, ctx: Context) -> None:
         node_id = ctx.node_id if isinstance(ctx, (NodeContext, MessageContext, ExpiryContext, WaypointReceivedContext)) else None
         wp_id = getattr(ctx, "triggering_waypoint_id", None)
+        if wp_id is None and isinstance(ctx, ExpiryContext) and ctx.target_kind == "dynamic_waypoint":
+            wp_id = ctx.target
         entered_zones = ctx.entered_zones if isinstance(ctx, NodeContext) else frozenset()
         if entered_zones:
             zone_id = next(iter(entered_zones))
