@@ -418,6 +418,9 @@ events:
             expiry_mins: 15
             initial_flags:
               - laser_target
+            mesh_name: "🎯 TARGET LOCK"
+            mesh_description: "Evacuate immediately."
+            mesh_channel: comms
           - type: send_message
             message_label: target_locked
             to_channel: comms
@@ -436,6 +439,8 @@ events:
         flag: game_over
         target: chattanooga_fringe_a
     responses:
+      - type: delete_mesh_waypoint
+        use_triggering_waypoint: true
       - type: random_options
         options:
           - weight: 95

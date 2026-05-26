@@ -57,6 +57,12 @@ questions.
 
 Generate a complete, runnable YAML file. Follow these rules:
 
+**Debugging tip for users:** The bot's `--replay-log <path>` flag appends a JSONL record
+for every event that fires during a run. `--replay-log-verbose <path>` also records events
+that were evaluated but skipped — with the reason (`"exception:node_has_flag:staff"`,
+`"max_triggers"`, `"cooldown"`, etc.). Point players at this file to diagnose why an event
+didn't fire when expected. Not a YAML config field — it's a bot CLI flag only.
+
 **Structure**
 - Include all required sections: `channels`, `flags`, `messages`, `events`
 - Include `zones`, `waypoints`, `nodes`, `variables`, `mutable_variables`,
@@ -238,6 +244,23 @@ events:
         to_triggering_node: true
 ```
 
+*Previous distance and movement delta:*
+
+`prev_distance_to_waypoint` is the distance from the node's *previous* recorded position
+to the waypoint (metres, integer). Pair it with `distance_to_waypoint` when you need to
+show both "was" and "now" distances in the same message.
+
+`distance_change_to_waypoint` subtracts prev from current: negative = closer, positive =
+farther (one decimal place). Use it as the `variable_threshold` trigger for direction
+flags rather than comparing the two distance variables yourself.
+
+`current_position` and `prev_position` return `"lat, lon"` to five decimal places for the
+node's current and previous fixes respectively. Useful for debug messages or recording
+where a player was when an event fired.
+
+All four require `scope: node`. `prev_*` variants return `[unknown]` until the node has sent
+at least two position updates.
+
 *Mutable variable counter with upgrade gate:*
 
 ```yaml
@@ -336,6 +359,43 @@ events:
       flag_label: valid_target
       to_triggering_node: true
 ```
+
+*Multi-polygon areas via zone groups:*
+
+When a play area can't fit in one triangle, split it into adjacent triangles and add
+them all to a zone group. Use `enters_zone_group` / `leaves_zone_group` / `in_zone_group`
+against the group instead of duplicating event blocks per triangle.
+
+```yaml
+zones:
+  - label: arena_a
+    points: [[37.76, -122.42], [37.77, -122.42], [37.77, -122.41]]
+  - label: arena_b
+    points: [[37.76, -122.42], [37.77, -122.41], [37.76, -122.41]]
+
+groups:
+  - label: arena_zones
+    kind: zone
+    members: [arena_a, arena_b]
+
+events:
+  - label: enter_arena
+    trigger:
+      type: enters_zone_group
+      zone_group: arena_zones   # fires when node enters any member zone
+    trigger_per_node: true
+    responses:
+      - type: add_flag
+        flag_label: in_arena
+        to_triggering_node: true
+```
+
+`{zone}` in message templates resolves to the specific zone that triggered the event,
+so a single event block can report which triangle the node crossed into.
+
+`in_zone_group_on_start` is the periodic equivalent — fires during each periodic check
+if any located node is currently inside any member zone. Use it in place of
+`in_zone_on_start` when the area spans multiple triangles.
 
 *Win condition via computed variable:*
 ```yaml
@@ -437,6 +497,86 @@ exceptions:
     target: play_zone_a
 ```
 
+**Mesh waypoint broadcast (orbital cannon pattern):**
+Use `create_waypoint` with `mesh_*` fields to simultaneously create an internal dynamic
+waypoint and push a visible waypoint to players' Meshtastic maps. Link them so the mesh
+waypoint is deleted automatically when the dynamic waypoint expires:
+
+```yaml
+events:
+  - label: cannon_selector
+    trigger:
+      type: time_window
+      start: "2020-01-01T00:00:00"
+      end:   "2099-01-01T00:00:00"
+    auto_recur: true
+    recur_mins: 60
+    responses:
+      - type: with_node
+        to_all_with_flag: valid_target
+        random_n: 1
+        responses:
+          - type: create_waypoint
+            expiry_mins: 60
+            initial_flags:
+              - laser_target
+            mesh_name: "🛰️ TARGET LOCK"          # max 30 chars
+            mesh_description: "Evac in 60 min."  # max 100 chars
+            mesh_channel: game_channel            # broadcasts to channel
+
+  - label: blast_cleanup
+    trigger:
+      type: flag_expired
+      flag_label: laser_target
+      target_kind: dynamic_waypoint
+    responses:
+      - type: delete_mesh_waypoint
+        use_triggering_waypoint: true             # resolves via linked dynamic waypoint
+```
+
+`use_triggering_waypoint: true` only works when the dynamic waypoint was created with
+`mesh_*` fields — the mesh_waypoint_id is stored on the dynamic waypoint row at creation.
+
+For a mesh-only waypoint with no internal tracking (static marker, hint drop):
+```yaml
+- type: broadcast_waypoint
+  name: "🏁 Finish Line"
+  description: "Cross here to win."
+  lat: 37.7749          # explicit coords required when no node location is available
+  lon: -122.4194
+  expiry_mins: 480
+  label: finish_line    # required if you plan to delete_mesh_waypoint later
+  to_channel: game_channel
+```
+
+**`waypoint_received` trigger** — fires when the bot receives a `WAYPOINT_APP` packet.
+Common use: scout nodes broadcast supply drops or objectives; base reacts.
+
+```yaml
+messages:
+  - label: supply_ack
+    text: "Confirmed, {node_id}. Supply drop logged: {waypoint_name}"
+  - label: supply_alert
+    text: "Supply drop at {waypoint_lat},{waypoint_lon} — {waypoint_name}"
+
+events:
+  - label: supply_received
+    trigger:
+      type: waypoint_received
+      from_flag: scout          # only from nodes with this flag
+      name_contains: "supply"   # case-insensitive substring match on waypoint name
+    responses:
+      - type: send_message
+        message_label: supply_ack
+        to_triggering_node: true  # DM the scout who broadcast it
+      - type: send_message
+        message_label: supply_alert
+        to_channel: ops_channel
+```
+
+Available interpolation tokens: `{waypoint_name}`, `{waypoint_description}`,
+`{waypoint_lat}`, `{waypoint_lon}`, `{node_id}` (sender's hex ID).
+
 **Triangular zones:**
 Zones must have exactly 3 points. Cover rectangular areas with two triangles:
 ```yaml
@@ -467,6 +607,7 @@ Before outputting any YAML, mentally verify:
 
 - [ ] Every label referenced in a trigger, response, or exception is defined in its section
 - [ ] Every `near_waypoint`, `near_zone`, `near_node` trigger has `meters`
+- [ ] Every `*_zone_group` / `in_zone_group` / `in_zone_group_on_start` trigger has `zone_group` (not `target`), and the referenced group has `kind: zone`
 - [ ] Every `channel` trigger has `channel_label`
 - [ ] Every `zone_has_flag`/`waypoint_has_flag` exception has `target` (or is in a dynamic waypoint context)
 - [ ] Every `*_in_group`/`*_not_in_group` exception has `group`; zone/waypoint group exceptions also have `target`
@@ -488,6 +629,14 @@ Before outputting any YAML, mentally verify:
 - [ ] `send_alert` used only for genuine safety/urgency situations, not ordinary confirmations
 - [ ] `node_*` tracks variables are `scope: node`; pair with `request_telemetry` if fresh values are needed
 - [ ] No real-world coordinates, node IDs, or personally-identifying information
+- [ ] `create_waypoint` with `mesh_*` fields: `mesh_name` ≤30 chars, `mesh_description` ≤100 chars;
+  exactly one of `mesh_channel` or `mesh_to_triggering_node` is set; trigger provides node context
+- [ ] `broadcast_waypoint`: `name` ≤30 chars, `description` ≤100 chars; `lat`/`lon` both set or
+  both omitted; explicit coords required when trigger is `time_window` or `in_zone_on_start`
+  (no node location available); `label` set if `delete_mesh_waypoint` will reference it
+- [ ] `delete_mesh_waypoint`: exactly one of `label` or `use_triggering_waypoint` is set;
+  `use_triggering_waypoint: true` only valid when the triggering dynamic waypoint was created
+  with `mesh_*` fields
 
 ## Reference examples
 

@@ -98,10 +98,21 @@ CREATE TABLE IF NOT EXISTS dynamic_waypoint_flags (
     PRIMARY KEY (waypoint_id, flag_label)
 );
 
+CREATE TABLE IF NOT EXISTS mesh_waypoints (
+    mesh_waypoint_id  INTEGER PRIMARY KEY,
+    label             TEXT,
+    name              TEXT NOT NULL,
+    lat               REAL NOT NULL,
+    lon               REAL NOT NULL,
+    created_at        TEXT NOT NULL,
+    expires_at        TEXT
+);
+
 CREATE INDEX IF NOT EXISTS idx_node_flags_label ON node_flags(flag_label);
 CREATE INDEX IF NOT EXISTS idx_node_locations_id ON node_locations(node_id);
 CREATE INDEX IF NOT EXISTS idx_mutable_variables_label ON mutable_variables(label);
 CREATE INDEX IF NOT EXISTS idx_dynamic_waypoint_flags_label ON dynamic_waypoint_flags(flag_label);
+CREATE INDEX IF NOT EXISTS idx_mesh_waypoints_label ON mesh_waypoints(label);
 """
 
 _FLAG_TABLE = {
@@ -133,6 +144,11 @@ class GameState:
             self._conn.executescript(_SCHEMA)
             try:
                 self._conn.execute("ALTER TABLE event_state ADD COLUMN disabled INTEGER NOT NULL DEFAULT 0")
+                self._conn.commit()
+            except Exception:
+                pass
+            try:
+                self._conn.execute("ALTER TABLE dynamic_waypoints ADD COLUMN mesh_waypoint_id INTEGER")
                 self._conn.commit()
             except Exception:
                 pass
@@ -635,6 +651,79 @@ class GameState:
             if expired:
                 self._conn.commit()
         return expired
+
+    # ------------------------------------------------------------------
+    # Mesh waypoints
+    # ------------------------------------------------------------------
+
+    def store_mesh_waypoint(
+        self,
+        mesh_waypoint_id: int,
+        name: str,
+        lat: float,
+        lon: float,
+        label: str | None = None,
+        expiry_mins: float | None = None,
+    ) -> None:
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO mesh_waypoints"
+                "(mesh_waypoint_id, label, name, lat, lon, created_at, expires_at)"
+                " VALUES(?, ?, ?, ?, ?, ?, ?)",
+                (mesh_waypoint_id, label, name, lat, lon, _now_iso(), _expires_iso(expiry_mins)),
+            )
+            self._conn.commit()
+
+    def delete_mesh_waypoint_record(self, mesh_waypoint_id: int) -> None:
+        with self._lock:
+            self._conn.execute(
+                "DELETE FROM mesh_waypoints WHERE mesh_waypoint_id=?", (mesh_waypoint_id,)
+            )
+            self._conn.commit()
+
+    def get_mesh_waypoint_id_by_label(self, label: str) -> int | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT mesh_waypoint_id FROM mesh_waypoints WHERE label=?", (label,)
+            ).fetchone()
+            return row["mesh_waypoint_id"] if row else None
+
+    def get_mesh_waypoint_id_for_dynamic(self, dynamic_waypoint_id: int) -> int | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT mesh_waypoint_id FROM dynamic_waypoints WHERE id=?",
+                (dynamic_waypoint_id,),
+            ).fetchone()
+            return row["mesh_waypoint_id"] if row else None
+
+    def set_mesh_waypoint_id_for_dynamic(
+        self, dynamic_waypoint_id: int, mesh_waypoint_id: int
+    ) -> None:
+        with self._lock:
+            self._conn.execute(
+                "UPDATE dynamic_waypoints SET mesh_waypoint_id=? WHERE id=?",
+                (mesh_waypoint_id, dynamic_waypoint_id),
+            )
+            self._conn.commit()
+
+    def expire_mesh_waypoints(self) -> list[int]:
+        """Delete expired mesh_waypoints rows; return list of mesh_waypoint_ids to delete from mesh."""
+        now = _now_iso()
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT mesh_waypoint_id FROM mesh_waypoints"
+                " WHERE expires_at IS NOT NULL AND expires_at <= ?",
+                (now,),
+            ).fetchall()
+            if not rows:
+                return []
+            ids = [r["mesh_waypoint_id"] for r in rows]
+            self._conn.execute(
+                "DELETE FROM mesh_waypoints WHERE expires_at IS NOT NULL AND expires_at <= ?",
+                (now,),
+            )
+            self._conn.commit()
+            return ids
 
     def get_dynamic_waypoint_count(self) -> int:
         now = _now_iso()

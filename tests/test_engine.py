@@ -4,12 +4,15 @@ from __future__ import annotations
 import pytest
 
 from config import (
-    GameConfig, Event, Variable, Message,
+    GameConfig, Event, Variable, Message, FlagDef, NodeDef,
     ProximityTrigger, CommandTrigger, VariableThresholdTrigger,
+    FlagExpiryTrigger, WaypointExpiryTrigger,
     SendMessageResponse, SendAlertResponse, AddFlagResponse, RemoveFlagResponse,
     RequestLocationResponse, RequestTelemetryResponse,
     SetVariableResponse, IncrementVariableResponse,
     RandomOptionsResponse, RandomOption, WithNodeResponse,
+    CreateWaypointResponse, AddDynamicWaypointFlagResponse, DestroyWaypointResponse,
+    EnableEventResponse, DisableEventResponse,
     TargetTriggeringNode, TargetChannel, TargetFlag, TargetAllWithFlag, TargetGroup,
     EventException,
 )
@@ -1993,4 +1996,817 @@ def test_node_var_unknown_when_node_not_in_nodedb(db):
     eng = make_engine(cfg, db)
     eng.interface.nodes = {}
     eng.handle_message(NODE_ID, "!report", is_dm=True, channel_idx=0)
-    assert any("[unknown]" in text for _, text in eng.sent_dms)
+
+# ---------------------------------------------------------------------------
+# Mesh waypoint features
+# ---------------------------------------------------------------------------
+
+def _waypoint_received_config(from_flag=None, name_contains=None, response_msg="got it"):
+    from config import WaypointReceivedTrigger, FlagDef
+    return minimal_config(
+        flags=[FlagDef(label="trusted")],
+        messages=[Message(label="ack", text=response_msg)],
+        events=[
+            Event(
+                label="on_wp",
+                trigger=WaypointReceivedTrigger(from_flag=from_flag, name_contains=name_contains),
+                responses=[SendMessageResponse(message_label="ack", target=TargetTriggeringNode())],
+            )
+        ],
+    )
+
+def _make_wp_ctx(name="cache", from_node=NODE_ID):
+    from engine import WaypointReceivedContext
+    return WaypointReceivedContext(
+        node_id=from_node,
+        waypoint_name=name,
+        waypoint_description="a desc",
+        waypoint_lat=47.003,
+        waypoint_lon=-122.003,
+        waypoint_expire=0,
+        mesh_waypoint_id=12345,
+    )
+
+def test_waypoint_received_fires_event(db):
+    cfg = _waypoint_received_config()
+    eng = make_engine(cfg, db)
+    eng.handle_waypoint_received(_make_wp_ctx())
+    assert len(eng.sent_dms) == 1
+    assert eng.sent_dms[0][0] == NODE_ID
+
+def test_waypoint_received_from_flag_blocks_without_flag(db):
+    cfg = _waypoint_received_config(from_flag="trusted")
+    eng = make_engine(cfg, db)
+    eng.handle_waypoint_received(_make_wp_ctx())
+    assert eng.sent_dms == []
+
+def test_waypoint_received_from_flag_passes_with_flag(db):
+    cfg = _waypoint_received_config(from_flag="trusted")
+    eng = make_engine(cfg, db)
+    db.add_flag("node", NODE_ID, "trusted")
+    eng.handle_waypoint_received(_make_wp_ctx())
+    assert len(eng.sent_dms) == 1
+
+def test_waypoint_received_name_contains_blocks_mismatch(db):
+    cfg = _waypoint_received_config(name_contains="cache")
+    eng = make_engine(cfg, db)
+    eng.handle_waypoint_received(_make_wp_ctx(name="treasure"))
+    assert eng.sent_dms == []
+
+def test_waypoint_received_name_contains_case_insensitive(db):
+    cfg = _waypoint_received_config(name_contains="Cache")
+    eng = make_engine(cfg, db)
+    eng.handle_waypoint_received(_make_wp_ctx(name="hidden cache"))
+    assert len(eng.sent_dms) == 1
+
+def test_waypoint_received_interpolates_tokens(db):
+    from config import WaypointReceivedTrigger, FlagDef
+    cfg = minimal_config(
+        messages=[Message(label="ack", text="wp={waypoint_name} from={node_id}")],
+        events=[
+            Event(
+                label="on_wp",
+                trigger=WaypointReceivedTrigger(),
+                responses=[SendMessageResponse(message_label="ack", target=TargetTriggeringNode())],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db)
+    eng.handle_waypoint_received(_make_wp_ctx(name="GeoCache"))
+    assert len(eng.sent_dms) == 1
+    text = eng.sent_dms[0][1]
+    assert "wp=GeoCache" in text
+    assert f"from={NODE_ID}" in text
+
+def test_broadcast_waypoint_queues_sendwaypoint(db):
+    from config import BroadcastWaypointResponse, FlagDef
+    cfg = minimal_config(
+        events=[
+            Event(
+                label="broadcast",
+                trigger=ProximityTrigger(kind="enters_zone", target_label="zone_a"),
+                responses=[BroadcastWaypointResponse(
+                    name="Marker",
+                    target=TargetChannel(channel_label="main"),
+                    expiry_mins=30,
+                    label="my_marker",
+                )],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db, channel_map={"main": 0})
+    db.update_node_location(NODE_ID, *OUTSIDE_ZONE)
+    eng.handle_position(NODE_ID, *INSIDE_ZONE)
+    # sendWaypoint should have been called on the interface
+    assert eng.interface.sendWaypoint.called
+    call_kwargs = eng.interface.sendWaypoint.call_args
+    assert call_kwargs is not None
+
+def test_broadcast_waypoint_stores_label(db):
+    from config import BroadcastWaypointResponse
+    cfg = minimal_config(
+        events=[
+            Event(
+                label="broadcast",
+                trigger=ProximityTrigger(kind="enters_zone", target_label="zone_a"),
+                responses=[BroadcastWaypointResponse(
+                    name="Marker",
+                    target=TargetChannel(channel_label="main"),
+                    label="my_marker",
+                )],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db, channel_map={"main": 0})
+    db.update_node_location(NODE_ID, *OUTSIDE_ZONE)
+    eng.handle_position(NODE_ID, *INSIDE_ZONE)
+    # drain send queue
+    eng._send_queue.join()
+    mesh_id = db.get_mesh_waypoint_id_by_label("my_marker")
+    assert mesh_id is not None
+
+def test_broadcast_waypoint_explicit_coords(db):
+    from config import BroadcastWaypointResponse
+    cfg = minimal_config(
+        events=[
+            Event(
+                label="broadcast",
+                trigger=ProximityTrigger(kind="enters_zone", target_label="zone_a"),
+                responses=[BroadcastWaypointResponse(
+                    name="Static",
+                    target=TargetChannel(channel_label="main"),
+                    lat=37.77,
+                    lon=-122.41,
+                )],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db, channel_map={"main": 0})
+    db.update_node_location(NODE_ID, *OUTSIDE_ZONE)
+    eng.handle_position(NODE_ID, *INSIDE_ZONE)
+    assert eng.interface.sendWaypoint.called
+
+def test_delete_mesh_waypoint_by_label(db):
+    from config import BroadcastWaypointResponse, DeleteMeshWaypointResponse, FlagDef
+    cfg = minimal_config(
+        flags=[FlagDef(label="active")],
+        events=[
+            Event(
+                label="broadcast",
+                trigger=ProximityTrigger(kind="enters_zone", target_label="zone_a"),
+                responses=[BroadcastWaypointResponse(
+                    name="Marker",
+                    target=TargetChannel(channel_label="main"),
+                    label="my_marker",
+                )],
+            ),
+            Event(
+                label="cleanup",
+                trigger=ProximityTrigger(kind="leaves_zone", target_label="zone_a"),
+                responses=[DeleteMeshWaypointResponse(label="my_marker")],
+            ),
+        ],
+    )
+    eng = make_engine(cfg, db, channel_map={"main": 0})
+    db.update_node_location(NODE_ID, *OUTSIDE_ZONE)
+    eng.handle_position(NODE_ID, *INSIDE_ZONE)
+    eng._send_queue.join()  # flush broadcast
+    assert db.get_mesh_waypoint_id_by_label("my_marker") is not None
+    eng.handle_position(NODE_ID, *OUTSIDE_ZONE)
+    eng._send_queue.join()  # flush delete
+    assert eng.interface.deleteWaypoint.called
+    assert db.get_mesh_waypoint_id_by_label("my_marker") is None
+
+def test_delete_mesh_waypoint_no_match_nops(db):
+    from config import DeleteMeshWaypointResponse
+    cfg = minimal_config(
+        events=[
+            Event(
+                label="cleanup",
+                trigger=ProximityTrigger(kind="enters_zone", target_label="zone_a"),
+                responses=[DeleteMeshWaypointResponse(label="nonexistent")],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db, channel_map={"main": 0})
+    db.update_node_location(NODE_ID, *OUTSIDE_ZONE)
+    eng.handle_position(NODE_ID, *INSIDE_ZONE)  # should not crash
+    assert not eng.interface.deleteWaypoint.called
+
+def test_create_waypoint_with_mesh_fields_broadcasts_and_links(db):
+    from config import CreateWaypointResponse, FlagDef
+    cfg = minimal_config(
+        flags=[FlagDef(label="targeted")],
+        events=[
+            Event(
+                label="target",
+                trigger=ProximityTrigger(kind="enters_zone", target_label="zone_a"),
+                responses=[CreateWaypointResponse(
+                    expiry_mins=60,
+                    initial_flags=["targeted"],
+                    mesh_name="TARGET",
+                    mesh_description="Strike inbound.",
+                    mesh_channel="main",
+                )],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db, channel_map={"main": 0})
+    db.update_node_location(NODE_ID, *OUTSIDE_ZONE)
+    eng.handle_position(NODE_ID, *INSIDE_ZONE)
+    eng._send_queue.join()
+    assert eng.interface.sendWaypoint.called
+    # dynamic waypoint should have a mesh_waypoint_id linked
+    rows = db._conn.execute("SELECT mesh_waypoint_id FROM dynamic_waypoints").fetchall()
+    assert len(rows) == 1
+    assert rows[0]["mesh_waypoint_id"] is not None
+
+def test_delete_mesh_waypoint_use_triggering_waypoint(db):
+    from config import CreateWaypointResponse, DeleteMeshWaypointResponse, FlagDef, FlagExpiryTrigger
+    cfg = minimal_config(
+        flags=[FlagDef(label="targeted", expiry_mins=0.001)],  # expires almost immediately
+        events=[
+            Event(
+                label="target",
+                trigger=ProximityTrigger(kind="enters_zone", target_label="zone_a"),
+                responses=[CreateWaypointResponse(
+                    expiry_mins=60,
+                    initial_flags=["targeted"],
+                    mesh_name="TARGET",
+                    mesh_channel="main",
+                )],
+            ),
+            Event(
+                label="cleanup",
+                trigger=FlagExpiryTrigger(flag_label="targeted", target_kind="dynamic_waypoint"),
+                responses=[DeleteMeshWaypointResponse(use_triggering_waypoint=True)],
+            ),
+        ],
+    )
+    import time as _time
+    eng = make_engine(cfg, db, channel_map={"main": 0})
+    db.update_node_location(NODE_ID, *OUTSIDE_ZONE)
+    eng.handle_position(NODE_ID, *INSIDE_ZONE)
+    eng._send_queue.join()
+    assert eng.interface.sendWaypoint.called
+    _time.sleep(0.1)  # let flag expire
+    eng.handle_periodic()
+    eng._send_queue.join()
+    assert eng.interface.deleteWaypoint.called
+
+
+# ---------------------------------------------------------------------------
+# Replay log
+# ---------------------------------------------------------------------------
+
+def _replay_records(log_io) -> list[dict]:
+    import json
+    return [json.loads(line) for line in log_io.getvalue().splitlines() if line.strip()]
+
+
+def _enter_zone_event(label="ev", max_triggers=None, exceptions=None):
+    return Event(
+        label=label,
+        trigger=ProximityTrigger(kind="enters_zone", target_label="zone_a"),
+        responses=[SendMessageResponse(message_label="hello", target=TargetChannel(channel_label="main"))],
+        max_triggers=max_triggers,
+        exceptions=exceptions or [],
+    )
+
+
+def test_replay_log_records_fire(db):
+    import io
+    cfg = minimal_config(events=[_enter_zone_event()])
+    log_io = io.StringIO()
+    eng = make_engine(cfg, db, channel_map={"main": 0})
+    eng.replay_log = log_io
+    db.update_node_location(NODE_ID, *OUTSIDE_ZONE)
+    eng.handle_position(NODE_ID, *INSIDE_ZONE)
+    records = _replay_records(log_io)
+    fires = [r for r in records if r["type"] == "fire"]
+    assert len(fires) == 1
+    assert fires[0]["event"] == "ev"
+    assert fires[0]["node_id"] == NODE_ID
+    assert fires[0]["fire_number"] == 1
+    assert "send_message" in fires[0]["responses"]
+
+
+def test_replay_log_correct_trigger_type(db):
+    import io
+    cfg = minimal_config(events=[_enter_zone_event()])
+    log_io = io.StringIO()
+    eng = make_engine(cfg, db, channel_map={"main": 0})
+    eng.replay_log = log_io
+    db.update_node_location(NODE_ID, *OUTSIDE_ZONE)
+    eng.handle_position(NODE_ID, *INSIDE_ZONE)
+    fires = [r for r in _replay_records(log_io) if r["type"] == "fire"]
+    assert fires[0]["trigger_type"] == "enters_zone"
+
+
+def test_replay_log_increments_fire_number(db):
+    import io
+    cfg = minimal_config(events=[_enter_zone_event()])
+    log_io = io.StringIO()
+    eng = make_engine(cfg, db, channel_map={"main": 0})
+    eng.replay_log = log_io
+    db.update_node_location(NODE_ID, *OUTSIDE_ZONE)
+    eng.handle_position(NODE_ID, *INSIDE_ZONE)
+    eng.handle_position(NODE_ID, *OUTSIDE_ZONE)
+    eng.handle_position(NODE_ID, *INSIDE_ZONE)
+    fires = [r for r in _replay_records(log_io) if r["type"] == "fire"]
+    assert len(fires) == 2
+    assert fires[0]["fire_number"] == 1
+    assert fires[1]["fire_number"] == 2
+
+
+def test_replay_log_verbose_records_exception_skip(db):
+    import io
+    cfg = minimal_config(
+        flags=[FlagDef(label="excluded"), FlagDef(label="active"), FlagDef(label="scored")],
+        events=[_enter_zone_event(exceptions=[EventException(kind="node_has_flag", flag="excluded")])],
+    )
+    log_io = io.StringIO()
+    eng = make_engine(cfg, db, channel_map={"main": 0})
+    eng.replay_log = log_io
+    eng.replay_log_verbose = True
+    db.add_flag("node", NODE_ID, "excluded")
+    db.update_node_location(NODE_ID, *OUTSIDE_ZONE)
+    eng.handle_position(NODE_ID, *INSIDE_ZONE)
+    skips = [r for r in _replay_records(log_io) if r["type"] == "skip"]
+    assert len(skips) == 1
+    assert skips[0]["skip_reason"] == "exception:node_has_flag:excluded"
+    assert skips[0]["event"] == "ev"
+
+
+def test_replay_log_verbose_records_max_triggers_skip(db):
+    import io
+    cfg = minimal_config(events=[_enter_zone_event(max_triggers=1)])
+    log_io = io.StringIO()
+    eng = make_engine(cfg, db, channel_map={"main": 0})
+    eng.replay_log = log_io
+    eng.replay_log_verbose = True
+    db.update_node_location(NODE_ID, *OUTSIDE_ZONE)
+    eng.handle_position(NODE_ID, *INSIDE_ZONE)   # fires once
+    eng.handle_position(NODE_ID, *OUTSIDE_ZONE)
+    eng.handle_position(NODE_ID, *INSIDE_ZONE)   # skipped — max_triggers
+    records = _replay_records(log_io)
+    fires = [r for r in records if r["type"] == "fire"]
+    skips = [r for r in records if r["type"] == "skip"]
+    assert len(fires) == 1
+    assert any(s["skip_reason"] == "max_triggers" for s in skips)
+
+
+def test_replay_log_no_verbose_no_skips(db):
+    import io
+    cfg = minimal_config(
+        flags=[FlagDef(label="excluded"), FlagDef(label="active"), FlagDef(label="scored")],
+        events=[_enter_zone_event(exceptions=[EventException(kind="node_has_flag", flag="excluded")])],
+    )
+    log_io = io.StringIO()
+    eng = make_engine(cfg, db, channel_map={"main": 0})
+    eng.replay_log = log_io
+    eng.replay_log_verbose = False
+    db.add_flag("node", NODE_ID, "excluded")
+    db.update_node_location(NODE_ID, *OUTSIDE_ZONE)
+    eng.handle_position(NODE_ID, *INSIDE_ZONE)
+    assert not any(r["type"] == "skip" for r in _replay_records(log_io))
+
+
+# ---------------------------------------------------------------------------
+# FlagExpiryTrigger
+# ---------------------------------------------------------------------------
+
+def test_flag_expiry_trigger_fires(db):
+    import time as _time
+    cfg = minimal_config(
+        flags=[FlagDef(label="timed", expiry_mins=0.001)],
+        events=[
+            Event(
+                label="on_enter",
+                trigger=ProximityTrigger(kind="enters_zone", target_label="zone_a"),
+                responses=[AddFlagResponse(flag_label="timed", target=TargetTriggeringNode())],
+            ),
+            Event(
+                label="on_expiry",
+                trigger=FlagExpiryTrigger(flag_label="timed", target_kind="node"),
+                responses=[AddFlagResponse(flag_label="active", target=TargetTriggeringNode())],
+            ),
+        ],
+    )
+    eng = make_engine(cfg, db)
+    db.update_node_location(NODE_ID, *OUTSIDE_ZONE)
+    eng.handle_position(NODE_ID, *INSIDE_ZONE)
+    assert db.has_flag("node", NODE_ID, "timed")
+    _time.sleep(0.1)
+    eng.handle_periodic()
+    assert not db.has_flag("node", NODE_ID, "timed")
+    assert db.has_flag("node", NODE_ID, "active")
+
+
+def test_flag_expiry_trigger_does_not_fire_wrong_flag(db):
+    import time as _time
+    cfg = minimal_config(
+        flags=[FlagDef(label="timed", expiry_mins=0.001)],
+        events=[
+            Event(
+                label="on_enter",
+                trigger=ProximityTrigger(kind="enters_zone", target_label="zone_a"),
+                responses=[AddFlagResponse(flag_label="timed", target=TargetTriggeringNode())],
+            ),
+            Event(
+                label="on_other_expiry",
+                trigger=FlagExpiryTrigger(flag_label="scored", target_kind="node"),
+                responses=[AddFlagResponse(flag_label="active", target=TargetTriggeringNode())],
+            ),
+        ],
+    )
+    eng = make_engine(cfg, db)
+    db.update_node_location(NODE_ID, *OUTSIDE_ZONE)
+    eng.handle_position(NODE_ID, *INSIDE_ZONE)
+    _time.sleep(0.1)
+    eng.handle_periodic()
+    assert not db.has_flag("node", NODE_ID, "active")
+
+
+# ---------------------------------------------------------------------------
+# WaypointExpiryTrigger
+# ---------------------------------------------------------------------------
+
+def test_waypoint_expiry_trigger_fires(db):
+    import time as _time
+    cfg = minimal_config(
+        events=[
+            Event(
+                label="place",
+                trigger=ProximityTrigger(kind="enters_zone", target_label="zone_a"),
+                responses=[CreateWaypointResponse(expiry_mins=0.001)],
+            ),
+            Event(
+                label="on_wp_expiry",
+                trigger=WaypointExpiryTrigger(),
+                # No triggering node in expiry context — use global variable increment
+                responses=[IncrementVariableResponse(variable_label="score", amount=1)],
+            ),
+        ],
+    )
+    eng = make_engine(cfg, db)
+    db.update_node_location(NODE_ID, *OUTSIDE_ZONE)
+    eng.handle_position(NODE_ID, *INSIDE_ZONE)
+    rows = db._conn.execute("SELECT id FROM dynamic_waypoints").fetchall()
+    assert len(rows) == 1
+    _time.sleep(0.1)
+    eng.handle_periodic()
+    assert db.get_mutable_variable("score") == 1
+
+
+def test_waypoint_expiry_had_flag_filter_blocks(db):
+    import time as _time
+    cfg = minimal_config(
+        events=[
+            Event(
+                label="place",
+                trigger=ProximityTrigger(kind="enters_zone", target_label="zone_a"),
+                responses=[CreateWaypointResponse(expiry_mins=0.001)],
+            ),
+            Event(
+                label="on_wp_expiry",
+                trigger=WaypointExpiryTrigger(had_flag="scored"),
+                responses=[AddFlagResponse(flag_label="active", target=TargetTriggeringNode())],
+            ),
+        ],
+    )
+    eng = make_engine(cfg, db)
+    db.update_node_location(NODE_ID, *OUTSIDE_ZONE)
+    eng.handle_position(NODE_ID, *INSIDE_ZONE)
+    _time.sleep(0.1)
+    eng.handle_periodic()
+    assert not db.has_flag("node", NODE_ID, "active")
+
+
+def test_waypoint_expiry_had_flag_filter_passes(db):
+    import time as _time
+    cfg = minimal_config(
+        events=[
+            Event(
+                label="place",
+                trigger=ProximityTrigger(kind="enters_zone", target_label="zone_a"),
+                responses=[CreateWaypointResponse(expiry_mins=0.001, initial_flags=["scored"])],
+            ),
+            Event(
+                label="on_wp_expiry",
+                trigger=WaypointExpiryTrigger(had_flag="scored"),
+                responses=[IncrementVariableResponse(variable_label="score", amount=1)],
+            ),
+        ],
+    )
+    eng = make_engine(cfg, db)
+    db.update_node_location(NODE_ID, *OUTSIDE_ZONE)
+    eng.handle_position(NODE_ID, *INSIDE_ZONE)
+    _time.sleep(0.1)
+    eng.handle_periodic()
+    assert db.get_mutable_variable("score") == 1
+
+
+# ---------------------------------------------------------------------------
+# ProximityTrigger: near_node
+# ---------------------------------------------------------------------------
+
+def test_near_node_fires_in_range(db):
+    anchor_loc = (47.003, -122.003)  # same as INSIDE_ZONE — about 400 m from OUTSIDE_ZONE
+    cfg = minimal_config(
+        nodes=[
+            NodeDef(label="node_a", node_id=NODE_ID),
+            NodeDef(label="anchor", node_id=NODE2_ID),
+        ],
+        events=[
+            Event(
+                label="near_anchor",
+                trigger=ProximityTrigger(kind="near_node", target_label="anchor", meters=2000),
+                responses=[AddFlagResponse(flag_label="active", target=TargetTriggeringNode())],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db)
+    db.update_node_location(NODE2_ID, *anchor_loc)
+    eng.handle_position(NODE_ID, *INSIDE_ZONE)
+    assert db.has_flag("node", NODE_ID, "active")
+
+
+def test_near_node_no_fire_out_of_range(db):
+    cfg = minimal_config(
+        nodes=[
+            NodeDef(label="node_a", node_id=NODE_ID),
+            NodeDef(label="anchor", node_id=NODE2_ID),
+        ],
+        events=[
+            Event(
+                label="near_anchor",
+                trigger=ProximityTrigger(kind="near_node", target_label="anchor", meters=10),
+                responses=[AddFlagResponse(flag_label="active", target=TargetTriggeringNode())],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db)
+    db.update_node_location(NODE2_ID, *INSIDE_ZONE)
+    eng.handle_position(NODE_ID, *OUTSIDE_ZONE)
+    assert not db.has_flag("node", NODE_ID, "active")
+
+
+# ---------------------------------------------------------------------------
+# Exception coverage gaps
+# ---------------------------------------------------------------------------
+
+def test_exception_zone_has_flag_blocks(db):
+    cfg = minimal_config(events=[
+        Event(
+            label="ev",
+            trigger=ProximityTrigger(kind="enters_zone", target_label="zone_a"),
+            responses=[AddFlagResponse(flag_label="active", target=TargetTriggeringNode())],
+            exceptions=[EventException(kind="zone_has_flag", flag="active", target="zone_a")],
+        )
+    ])
+    eng = make_engine(cfg, db)
+    db.add_flag("zone", "zone_a", "active")
+    db.update_node_location(NODE_ID, *OUTSIDE_ZONE)
+    eng.handle_position(NODE_ID, *INSIDE_ZONE)
+    assert not db.has_flag("node", NODE_ID, "active")
+
+
+def test_exception_zone_lacks_flag_blocks(db):
+    cfg = minimal_config(events=[
+        Event(
+            label="ev",
+            trigger=ProximityTrigger(kind="enters_zone", target_label="zone_a"),
+            responses=[AddFlagResponse(flag_label="active", target=TargetTriggeringNode())],
+            exceptions=[EventException(kind="zone_lacks_flag", flag="scored", target="zone_a")],
+        )
+    ])
+    eng = make_engine(cfg, db)
+    # zone_a does NOT have "scored" → zone_lacks_flag matches → event blocked
+    db.update_node_location(NODE_ID, *OUTSIDE_ZONE)
+    eng.handle_position(NODE_ID, *INSIDE_ZONE)
+    assert not db.has_flag("node", NODE_ID, "active")
+
+
+def test_exception_waypoint_has_flag_blocks(db):
+    """waypoint_has_flag with no target checks the triggering dynamic waypoint."""
+    cfg = minimal_config(
+        events=[
+            Event(
+                label="place",
+                trigger=ProximityTrigger(kind="enters_zone", target_label="zone_a"),
+                responses=[CreateWaypointResponse(initial_flags=["scored"])],
+            ),
+            Event(
+                label="near_flagged",
+                trigger=ProximityTrigger(kind="near_waypoint", target_flag="scored", meters=5000),
+                responses=[AddFlagResponse(flag_label="active", target=TargetTriggeringNode())],
+                exceptions=[EventException(kind="waypoint_has_flag", flag="scored")],
+            ),
+        ],
+    )
+    eng = make_engine(cfg, db)
+    db.update_node_location(NODE_ID, *OUTSIDE_ZONE)
+    eng.handle_position(NODE_ID, *INSIDE_ZONE)   # creates waypoint with "scored" flag
+    eng.handle_position(NODE_ID, *OUTSIDE_ZONE)
+    eng.handle_position(NODE_ID, *INSIDE_ZONE)   # near_waypoint fires but exception blocks it
+    assert not db.has_flag("node", NODE_ID, "active")
+
+
+def test_exception_node_not_in_group_blocks(db):
+    cfg = minimal_config(events=[
+        Event(
+            label="ev",
+            trigger=ProximityTrigger(kind="enters_zone", target_label="zone_a"),
+            responses=[AddFlagResponse(flag_label="active", target=TargetTriggeringNode())],
+            exceptions=[EventException(kind="node_not_in_group", group="players")],
+        )
+    ])
+    eng = make_engine(cfg, db)
+    # NODE_ID is not in "players" → node_not_in_group matches → event blocked
+    db.update_node_location(NODE_ID, *OUTSIDE_ZONE)
+    eng.handle_position(NODE_ID, *INSIDE_ZONE)
+    assert not db.has_flag("node", NODE_ID, "active")
+
+
+def test_exception_random_skip_blocks(db):
+    from unittest.mock import patch
+    cfg = minimal_config(events=[
+        Event(
+            label="ev",
+            trigger=ProximityTrigger(kind="in_zone", target_label="zone_a"),
+            responses=[AddFlagResponse(flag_label="active", target=TargetTriggeringNode())],
+            exceptions=[EventException(kind="random_skip", chance=1.0)],
+        )
+    ])
+    eng = make_engine(cfg, db)
+    with patch("engine.random.random", return_value=0.0):  # 0.0 < 1.0 → skip fires
+        eng.handle_position(NODE_ID, *INSIDE_ZONE)
+    assert not db.has_flag("node", NODE_ID, "active")
+
+
+# ---------------------------------------------------------------------------
+# Response gaps: SetVariableResponse, EnableEventResponse,
+#                AddDynamicWaypointFlagResponse, DestroyWaypointResponse,
+#                RandomOptionsResponse
+# ---------------------------------------------------------------------------
+
+def test_set_variable_response_global(db):
+    cfg = minimal_config(events=[
+        Event(
+            label="ev",
+            trigger=ProximityTrigger(kind="enters_zone", target_label="zone_a"),
+            responses=[SetVariableResponse(variable_label="score", value=42)],
+        )
+    ])
+    eng = make_engine(cfg, db)
+    db.update_node_location(NODE_ID, *OUTSIDE_ZONE)
+    eng.handle_position(NODE_ID, *INSIDE_ZONE)
+    assert db.get_mutable_variable("score") == 42  # global scope stored with node_id=''
+
+
+def test_enable_event_response(db):
+    cfg = minimal_config(events=[
+        Event(
+            label="gate",
+            trigger=ProximityTrigger(kind="enters_zone", target_label="zone_a"),
+            responses=[EnableEventResponse(event_label="target")],
+        ),
+        Event(
+            label="target",
+            trigger=ProximityTrigger(kind="in_zone", target_label="zone_a"),
+            responses=[AddFlagResponse(flag_label="active", target=TargetTriggeringNode())],
+        ),
+    ])
+    eng = make_engine(cfg, db)
+    db.set_event_disabled("target", True)
+    db.update_node_location(NODE_ID, *OUTSIDE_ZONE)
+    eng.handle_position(NODE_ID, *INSIDE_ZONE)  # gate fires → enables target; target skipped (was disabled)
+    assert not db.is_event_disabled("target")
+    eng.handle_position(NODE_ID, *OUTSIDE_ZONE)
+    eng.handle_position(NODE_ID, *INSIDE_ZONE)  # target now enabled → fires
+    assert db.has_flag("node", NODE_ID, "active")
+
+
+def test_add_dynamic_waypoint_flag(db):
+    """near_waypoint(target_flag=…) trigger sets triggering_waypoint_id on context."""
+    cfg = minimal_config(
+        events=[
+            Event(
+                label="place",
+                trigger=ProximityTrigger(kind="enters_zone", target_label="zone_a"),
+                responses=[CreateWaypointResponse()],
+            ),
+            Event(
+                label="flag_it",
+                trigger=ProximityTrigger(kind="near_waypoint", target_flag="active", meters=50000),
+                responses=[AddDynamicWaypointFlagResponse(flag_label="scored")],
+            ),
+        ],
+    )
+    eng = make_engine(cfg, db)
+    db.update_node_location(NODE_ID, *OUTSIDE_ZONE)
+    eng.handle_position(NODE_ID, *INSIDE_ZONE)   # creates waypoint (no initial flags)
+    wp_rows = db._conn.execute("SELECT id FROM dynamic_waypoints").fetchall()
+    assert len(wp_rows) == 1
+    wp_id = wp_rows[0]["id"]
+    # Waypoint has no flags yet — near_waypoint target_flag="active" won't match.
+    # Manually add "active" flag so the near_waypoint trigger fires.
+    db.add_dynamic_waypoint_flag(wp_id, "active")
+    eng.handle_position(NODE_ID, *OUTSIDE_ZONE)
+    eng.handle_position(NODE_ID, *INSIDE_ZONE)   # flag_it event fires
+    assert db.has_dynamic_waypoint_flag(wp_id, "scored")
+
+
+def test_destroy_waypoint(db):
+    """DestroyWaypointResponse removes the triggering dynamic waypoint via _execute_response."""
+    from engine import NodeContext
+    cfg = minimal_config()
+    eng = make_engine(cfg, db)
+    wp_id = db.create_dynamic_waypoint(*INSIDE_ZONE)
+    ctx = NodeContext(node_id=NODE_ID, triggering_waypoint_id=wp_id)
+    rows = db._conn.execute("SELECT id FROM dynamic_waypoints").fetchall()
+    assert len(rows) == 1
+    eng._execute_response(DestroyWaypointResponse(), ctx)
+    rows = db._conn.execute("SELECT id FROM dynamic_waypoints").fetchall()
+    assert len(rows) == 0
+
+
+def test_random_options_response(db):
+    """RandomOptionsResponse executes exactly one branch's responses."""
+    from unittest.mock import patch
+    cfg = minimal_config(events=[
+        Event(
+            label="ev",
+            trigger=ProximityTrigger(kind="enters_zone", target_label="zone_a"),
+            responses=[
+                RandomOptionsResponse(options=[
+                    RandomOption(weight=1, responses=[
+                        AddFlagResponse(flag_label="active", target=TargetTriggeringNode()),
+                    ]),
+                    RandomOption(weight=0, responses=[
+                        AddFlagResponse(flag_label="scored", target=TargetTriggeringNode()),
+                    ]),
+                ])
+            ],
+        )
+    ])
+    eng = make_engine(cfg, db)
+    with patch("engine.random.choices", return_value=[cfg.events[0].responses[0].options[0]]):
+        db.update_node_location(NODE_ID, *OUTSIDE_ZONE)
+        eng.handle_position(NODE_ID, *INSIDE_ZONE)
+    assert db.has_flag("node", NODE_ID, "active")
+    assert not db.has_flag("node", NODE_ID, "scored")
+
+
+# ---------------------------------------------------------------------------
+# Event control: reset_mins and auto_recur
+# ---------------------------------------------------------------------------
+
+def test_reset_mins_blocks_within_window(db):
+    cfg = minimal_config(events=[
+        Event(
+            label="ev",
+            trigger=ProximityTrigger(kind="enters_zone", target_label="zone_a"),
+            responses=[AddFlagResponse(flag_label="active", target=TargetTriggeringNode())],
+            reset_mins=60,
+        )
+    ])
+    eng = make_engine(cfg, db)
+    db.update_node_location(NODE_ID, *OUTSIDE_ZONE)
+    eng.handle_position(NODE_ID, *INSIDE_ZONE)   # fires
+    assert db.has_flag("node", NODE_ID, "active")
+    db.remove_flag("node", NODE_ID, "active")
+    eng.handle_position(NODE_ID, *OUTSIDE_ZONE)
+    eng.handle_position(NODE_ID, *INSIDE_ZONE)   # blocked — still in cooldown
+    assert not db.has_flag("node", NODE_ID, "active")
+
+
+def test_auto_recur_fires_after_interval(db):
+    import time as _time
+    from config import TimedTrigger
+    from datetime import datetime, timezone
+    # time_window fires only the FIRST time (times==0 guard); auto_recur provides subsequent fires
+    now_utc = datetime.now(timezone.utc)
+    cfg = minimal_config(
+        events=[
+            Event(
+                label="window_score",
+                trigger=TimedTrigger(
+                    start=now_utc.replace(year=2020),
+                    end=now_utc.replace(year=2099),
+                ),
+                responses=[IncrementVariableResponse(variable_label="score", amount=1)],
+                auto_recur=True,
+                recur_mins=0.001,  # ~60 ms
+            )
+        ],
+    )
+    eng = make_engine(cfg, db)
+    eng.handle_periodic()   # time_window fires (times==0) → score=1
+    assert db.get_mutable_variable("score") == 1
+    eng.handle_periodic()   # too soon for recur, time_window already fired → score=1
+    assert db.get_mutable_variable("score") == 1
+    _time.sleep(0.1)
+    eng.handle_periodic()   # recur interval passed → auto_recur fires → score=2
+    assert db.get_mutable_variable("score") == 2

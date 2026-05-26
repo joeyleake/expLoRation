@@ -1129,6 +1129,36 @@ trigger:
 
 ---
 
+#### `waypoint_received` — another node broadcasts a Meshtastic waypoint
+
+Fires when the bot receives a `WAYPOINT_APP` packet from another mesh node. Deletion
+packets (expiry=0) are filtered out before reaching the engine, so this trigger only
+fires for genuine waypoint broadcasts.
+
+```yaml
+trigger:
+  type: waypoint_received
+  from_flag: scout          # optional — only fire if sending node carries this flag
+  name_contains: "supply"   # optional — case-insensitive substring match on waypoint name
+```
+
+| Field | Required | Description |
+|---|---|---|
+| `from_flag` | no | A `flags` label. Only fires if the sending node currently carries this flag. |
+| `name_contains` | no | Only fires if the waypoint name contains this substring (case-insensitive). |
+
+In responses, the following interpolation tokens are available in message text:
+
+| Token | Value |
+|---|---|
+| `{waypoint_name}` | The waypoint's name field |
+| `{waypoint_description}` | The waypoint's description field |
+| `{waypoint_lat}` | Latitude formatted to 5 decimal places |
+| `{waypoint_lon}` | Longitude formatted to 5 decimal places |
+| `{node_id}` | Hex node ID of the sending node (`!aabbccdd` format) |
+
+---
+
 ### Responses
 
 Responses are executed in order when an event fires. Multiple responses in the
@@ -1455,6 +1485,96 @@ contexts as `add_waypoint_flag`.
 ```yaml
 - type: destroy_waypoint
 ```
+
+---
+
+#### `create_waypoint` with mesh fields — internal waypoint + mesh map broadcast
+
+`create_waypoint` accepts optional `mesh_*` fields. When `mesh_name` is present, the
+response both creates the internal dynamic waypoint (for flag/trigger use) **and** pushes
+a `WAYPOINT_APP` packet to the Meshtastic mesh so players see it on their maps.
+
+The mesh waypoint is automatically linked to the dynamic waypoint row. This means
+`delete_mesh_waypoint: use_triggering_waypoint: true` works correctly in a cleanup event
+without needing a label.
+
+```yaml
+- type: create_waypoint
+  expiry_mins: 60
+  initial_flags:
+    - laser_target
+  # Optional mesh broadcast fields:
+  mesh_name: "🛰️ TARGET LOCK"      # required to enable mesh push; max 30 chars
+  mesh_description: "Evac now."    # optional; max 100 chars
+  mesh_icon: 0                     # optional icon (Meshtastic icon code, default 0)
+  mesh_channel: game_channel       # broadcast to this channel (mutually exclusive with mesh_to_triggering_node)
+  mesh_to_triggering_node: false   # DM the waypoint to the triggering node instead
+  mesh_label: cannon_target        # optional label for later label-based deletion
+```
+
+| Field | Required | Description |
+|---|---|---|
+| `mesh_name` | yes (to enable) | Enables mesh push. Name shown on client maps; max 30 characters. |
+| `mesh_description` | no | Description shown in client popups; max 100 characters. |
+| `mesh_icon` | no | Meshtastic icon code; default 0. |
+| `mesh_channel` | one of | Broadcast channel label. Mutually exclusive with `mesh_to_triggering_node`. |
+| `mesh_to_triggering_node` | one of | If true, DM the waypoint to the triggering node instead of broadcasting. |
+| `mesh_label` | no | Store this waypoint in `mesh_waypoints` table under this label for later `delete_mesh_waypoint: label:` use. |
+
+**Note:** The waypoint is placed at the triggering node's last known location. If no location is known, the mesh push is skipped (the internal dynamic waypoint is still created).
+
+---
+
+#### `broadcast_waypoint` — push a waypoint to the Meshtastic mesh map
+
+Sends a `WAYPOINT_APP` packet to the mesh without creating an internal dynamic waypoint.
+Use this for static markers, hint locations, or DM waypoints where no internal tracking is needed.
+
+```yaml
+- type: broadcast_waypoint
+  name: "🏁 Finish Line"           # required; max 30 chars
+  description: "Cross here to win." # optional; max 100 chars
+  icon: 0                           # optional Meshtastic icon code
+  expiry_mins: 480                  # optional; mesh waypoint disappears after this many minutes
+  lat: 37.7749                      # explicit coordinates (both required if either is set)
+  lon: -122.4194                    # omit both to use the triggering node's location
+  label: finish_line                # optional label for later deletion
+  to_channel: game_channel          # target (see Targets; to_channel broadcasts, others DM)
+```
+
+| Field | Required | Description |
+|---|---|---|
+| `name` | yes | Waypoint name on client maps; max 30 characters. |
+| `description` | no | Pop-up description; max 100 characters. |
+| `icon` | no | Meshtastic icon code; default 0. |
+| `expiry_mins` | no | Minutes until the waypoint disappears from clients and expiry cleanup removes it. Must be positive. |
+| `lat` / `lon` | no | Explicit coordinates. Both must be provided together, or both omitted to use the triggering node's location. Required in `time_window` or `in_zone_on_start` contexts where no node location is available. |
+| `label` | no | Store in `mesh_waypoints` under this label so `delete_mesh_waypoint: label:` can remove it later. |
+| target key | yes | One target key (see Targets). `to_channel` broadcasts; all others DM each resolved node. |
+
+---
+
+#### `delete_mesh_waypoint` — remove a mesh waypoint from clients
+
+Sends a deletion packet to the mesh so clients remove the waypoint from their maps.
+Also removes the `mesh_waypoints` tracking record.
+
+```yaml
+- type: delete_mesh_waypoint
+  label: finish_line              # look up waypoint by label (mutually exclusive with use_triggering_waypoint)
+
+# -- or --
+
+- type: delete_mesh_waypoint
+  use_triggering_waypoint: true   # use the mesh_waypoint_id linked to the triggering dynamic waypoint
+```
+
+| Field | Required | Description |
+|---|---|---|
+| `label` | one of | Remove the mesh waypoint stored under this label. |
+| `use_triggering_waypoint` | one of | Look up the `mesh_waypoint_id` linked to the triggering dynamic waypoint. Useful in `flag_expired` or `waypoint_expired` cleanup events when the waypoint was created with `create_waypoint` + `mesh_*` fields. |
+
+`label` and `use_triggering_waypoint` are mutually exclusive; exactly one must be set.
 
 ---
 
