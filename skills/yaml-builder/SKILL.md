@@ -57,6 +57,12 @@ questions.
 
 Generate a complete, runnable YAML file. Follow these rules:
 
+**Debugging tip for users:** The bot's `--replay-log <path>` flag appends a JSONL record
+for every event that fires during a run. `--replay-log-verbose <path>` also records events
+that were evaluated but skipped — with the reason (`"exception:node_has_flag:staff"`,
+`"max_triggers"`, `"cooldown"`, etc.). Point players at this file to diagnose why an event
+didn't fire when expected. Not a YAML config field — it's a bot CLI flag only.
+
 **Structure**
 - Include all required sections: `channels`, `flags`, `messages`, `events`
 - Include `zones`, `waypoints`, `nodes`, `variables`, `mutable_variables`,
@@ -543,15 +549,33 @@ For a mesh-only waypoint with no internal tracking (static marker, hint drop):
   to_channel: game_channel
 ```
 
-**`waypoint_received` trigger** — fires when the bot receives a `WAYPOINT_APP` packet:
+**`waypoint_received` trigger** — fires when the bot receives a `WAYPOINT_APP` packet.
+Common use: scout nodes broadcast supply drops or objectives; base reacts.
+
 ```yaml
-trigger:
-  type: waypoint_received
-  from_flag: scout          # optional: only from nodes with this flag
-  name_contains: "supply"   # optional: case-insensitive name filter
+messages:
+  - label: supply_ack
+    text: "Confirmed, {node_id}. Supply drop logged: {waypoint_name}"
+  - label: supply_alert
+    text: "Supply drop at {waypoint_lat},{waypoint_lon} — {waypoint_name}"
+
+events:
+  - label: supply_received
+    trigger:
+      type: waypoint_received
+      from_flag: scout          # only from nodes with this flag
+      name_contains: "supply"   # case-insensitive substring match on waypoint name
+    responses:
+      - type: send_message
+        message_label: supply_ack
+        to_triggering_node: true  # DM the scout who broadcast it
+      - type: send_message
+        message_label: supply_alert
+        to_channel: ops_channel
 ```
-Available tokens in responses: `{waypoint_name}`, `{waypoint_description}`,
-`{waypoint_lat}`, `{waypoint_lon}`, `{node_id}`.
+
+Available interpolation tokens: `{waypoint_name}`, `{waypoint_description}`,
+`{waypoint_lat}`, `{waypoint_lon}`, `{node_id}` (sender's hex ID).
 
 **Triangular zones:**
 Zones must have exactly 3 points. Cover rectangular areas with two triangles:

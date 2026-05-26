@@ -90,13 +90,12 @@ events:
     max_triggers: 1
 
   # -----------------------------------------------------------------------
-  # Proximity: welcome any node that enters the start zone
+  # Entry: welcome any node that enters the start zone
   # -----------------------------------------------------------------------
   - label: enter_start_zone
     trigger:
-      type: near_zone
+      type: enters_zone
       target: start_zone
-      meters: 30
     responses:
       - type: send_message
         message_label: welcome
