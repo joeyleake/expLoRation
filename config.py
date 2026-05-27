@@ -619,14 +619,18 @@ def _parse_response(raw: dict) -> Response:
 
 def _parse_trigger(raw: dict):
     kind = raw.get("type")
+    _ZONE_GROUP_KINDS = frozenset(
+        ("enters_zone_group", "leaves_zone_group", "in_zone_group", "in_zone_group_on_start")
+    )
     if kind in ("near_waypoint", "near_zone", "near_node", "in_zone_on_start", "in_zone", "enters_zone", "leaves_zone",
                 "enters_zone_group", "leaves_zone_group", "in_zone_group", "in_zone_group_on_start"):
+        is_group = kind in _ZONE_GROUP_KINDS
         return ProximityTrigger(
             kind=kind,
-            target_label=raw.get("target"),
+            target_label=None if is_group else raw.get("target"),
             target_flag=raw.get("target_flag"),
             meters=float(raw["meters"]) if "meters" in raw else None,
-            zone_group=raw.get("target"),
+            zone_group=raw.get("target") if is_group else None,
         )
     if kind == "time_window":
         return TimedTrigger(

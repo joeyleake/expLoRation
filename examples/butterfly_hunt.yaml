@@ -1,6 +1,18 @@
 # Butterfly Hunt — Georgia Tech Campus
-# Butterflies spawn at random locations across campus. Walk within 10 meters to catch one.
-# A fresh batch of 10 spawns every 60 minutes.
+#
+# Butterflies spawn at random locations across campus every 60 minutes (10 per batch).
+# Walk within 10 meters of one to catch it.
+#
+# This example demonstrates two complementary patterns for keeping mesh waypoints
+# visible to all players despite radio congestion:
+#
+#   1. refresh_mins on create_waypoint — each waypoint re-broadcasts itself on its
+#      channel every 5 minutes so clients that missed the initial send catch up.
+#
+#   2. force_refresh_waypoint on zone entry — when a player enters the campus,
+#      the nearest uncaught butterfly is immediately re-broadcast. A
+#      refresh_cooldown_mins on the waypoint prevents a crowd of arrivals from
+#      flooding the channel.
 
 channels:
   - label: comms
@@ -27,7 +39,12 @@ messages:
 
 events:
   # ---------------------------------------------------------------------------
-  # Spawn 10 butterflies at start; respawn every 60 minutes
+  # Spawn 10 butterflies at start; respawn every 60 minutes.
+  # refresh_mins: 5          — re-broadcast each waypoint every 5 minutes so
+  #                            clients that missed the initial send catch up.
+  # refresh_cooldown_mins: 2 — prevents force_refresh_waypoint (below) from
+  #                            re-broadcasting the same waypoint more than once
+  #                            per 2 minutes when many players enter at once.
   # ---------------------------------------------------------------------------
   - label: spawn_butterflies
     trigger:
@@ -43,15 +60,29 @@ events:
           - type: create_waypoint
             randomly_in_zone: gt_campus
             expiry_mins: 60
-            refresh_mins: 5        # rebroadcast every 5 minutes so all clients render it
+            refresh_mins: 5
+            refresh_cooldown_mins: 2
             initial_flags:
               - butterfly
-            mesh_name: "wild butterfly #{waypoint_id}"
+            mesh_name: "🦋 butterfly #{waypoint_id}"
             mesh_icon: 129419      # 🦋
             mesh_channel: comms
 
   # ---------------------------------------------------------------------------
-  # Catch a butterfly — walk within 10 meters
+  # When a player enters the campus, immediately re-broadcast the nearest
+  # uncaught butterfly to help it appear on their map without waiting for the
+  # next scheduled refresh.
+  # ---------------------------------------------------------------------------
+  - label: refresh_on_enter
+    trigger:
+      type: enters_zone
+      target: gt_campus
+    responses:
+      - type: force_refresh_waypoint
+        flag_label: butterfly
+
+  # ---------------------------------------------------------------------------
+  # Catch a butterfly — walk within 10 meters.
   # ---------------------------------------------------------------------------
   - label: catch_butterfly
     trigger:
@@ -67,7 +98,7 @@ events:
       - type: destroy_waypoint
 
   # ---------------------------------------------------------------------------
-  # Clean up mesh waypoint when a butterfly expires naturally after 60 minutes
+  # Clean up mesh waypoint when a butterfly expires naturally after 60 minutes.
   # ---------------------------------------------------------------------------
   - label: butterfly_expired
     trigger:
