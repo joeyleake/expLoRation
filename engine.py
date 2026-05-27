@@ -23,10 +23,10 @@ from config import (
     DisableEventResponse, EnableEventResponse,
     AddToGroupResponse, RemoveFromGroupResponse,
     SetVariableResponse, IncrementVariableResponse,
-    RandomOptionsResponse, WithNodeResponse,
+    RandomOptionsResponse, WithNodeResponse, RepeatResponse,
     CreateWaypointResponse, AddDynamicWaypointFlagResponse,
     RemoveDynamicWaypointFlagResponse, DestroyWaypointResponse,
-    BroadcastWaypointResponse, DeleteMeshWaypointResponse,
+    BroadcastWaypointResponse, DeleteMeshWaypointResponse, ForceRefreshWaypointResponse,
     TargetTriggeringNode, TargetNode, TargetZone, TargetFlag,
     TargetWaypointRadius, TargetAllInZone, TargetAllWithFlag,
     TargetAllNearWaypoint, TargetAllNearTriggeringWaypoint, TargetAllNearNode, TargetChannel, TargetGroup,
@@ -255,15 +255,34 @@ class Engine:
         finally:
             self._suppress_messages = False
 
+    def _enqueue(self, kind: str, fn) -> None:
+        self._send_queue.put((kind, fn))
+
+    def drain_send_queue(self) -> None:
+        """Discard all pending items in the send queue without transmitting them.
+        Blocks briefly to let any in-flight item finish, then clears the rest.
+        Call before cleanup-on-exit to prevent the sender thread from creating
+        waypoints after they've already been deleted by cleanup."""
+        import queue as _queue
+        self._send_queue.join()  # wait for current in-flight item to finish
+        try:
+            while True:
+                self._send_queue.get_nowait()
+                self._send_queue.task_done()
+        except _queue.Empty:
+            pass
+
     def _sender_loop(self) -> None:
         while True:
-            fn = self._send_queue.get()
+            kind, fn = self._send_queue.get()
             try:
                 fn()
             except Exception:
                 log.exception("Error in sender thread")
             finally:
                 self._send_queue.task_done()
+            if self.replay_log_verbose and self.replay_log:
+                self._write_replay({"type": "send", "kind": kind})
             time.sleep(self.send_delay)
 
     # ------------------------------------------------------------------
@@ -338,6 +357,7 @@ class Engine:
         expired_waypoints = self.state.expire_dynamic_waypoints()
         self._dispatch_expiry_events([], [], expired_waypoints)
         self._delete_expired_mesh_waypoints(self.state.expire_mesh_waypoints())
+        self._refresh_due_waypoints()
         ctx = PeriodicContext()
         for event in self.config.events:
             if isinstance(event.trigger, TimedTrigger):
@@ -372,6 +392,37 @@ class Engine:
                 if self._should_fire(event, ctx):
                     self._fire_event(event, ctx)
 
+    def _refresh_due_waypoints(self) -> None:
+        waypoints = self.state.get_waypoints_due_for_refresh()
+        if not waypoints:
+            return
+        random.shuffle(waypoints)
+        from meshtastic import BROADCAST_ADDR as _BCAST
+        from datetime import datetime
+        refreshed_ids = []
+        for wp in waypoints:
+            ch_idx = self._resolve_channel_index(wp["channel"]) if wp["channel"] else None
+            if ch_idx is None:
+                log.warning("refresh_waypoint: channel %r not mapped for id=%d",
+                            wp["channel"], wp["mesh_waypoint_id"])
+                continue
+            expire_ts = int(datetime.fromisoformat(wp["expires_at"]).timestamp()) if wp["expires_at"] else 0
+            def _fn(n=wp["name"], d=wp["description"], ic=wp["icon"],
+                    ex=expire_ts, wid=wp["mesh_waypoint_id"],
+                    la=wp["lat"], lo=wp["lon"], ci=ch_idx, ba=_BCAST):
+                if self.interface is None:
+                    return
+                self.interface.sendWaypoint(
+                    name=n, description=d, icon=ic, expire=ex,
+                    waypoint_id=wid, latitude=la, longitude=lo,
+                    destinationId=ba, channelIndex=ci,
+                )
+                log.info("refresh_waypoint %r ch%d (id=%d)", n, ci, wid)
+            self._enqueue("refresh_waypoint", _fn)
+            refreshed_ids.append(wp["mesh_waypoint_id"])
+        self.state.mark_waypoints_refreshed(refreshed_ids)
+        log.info("Queued refresh for %d waypoint(s)", len(refreshed_ids))
+
     def _delete_expired_mesh_waypoints(self, expired_ids: list[int]) -> None:
         for mesh_wp_id in expired_ids:
             def _fn(mid=mesh_wp_id):
@@ -382,7 +433,7 @@ class Engine:
                     log.info("Deleted expired mesh waypoint id=%d", mid)
                 except Exception:
                     log.warning("Failed to delete expired mesh waypoint id=%d", mid, exc_info=True)
-            self._send_queue.put(_fn)
+            self._enqueue("delete_mesh_waypoint", _fn)
 
     # ------------------------------------------------------------------
     # Trigger evaluation
@@ -985,12 +1036,36 @@ class Engine:
                     except Exception:
                         log.exception("Error in with_node response for node %s", selected_id)
 
+        elif isinstance(resp, RepeatResponse):
+            for _ in range(resp.count):
+                for inner_resp in resp.responses:
+                    try:
+                        self._execute_response(inner_resp, ctx)
+                    except Exception:
+                        log.exception("Error in repeat response (iteration)")
+
         elif isinstance(resp, CreateWaypointResponse):
-            loc = self.state.get_node_location(node_id) if node_id else None
-            if loc is None:
-                log.warning("create_waypoint: no location for node %s; skipping", node_id)
-                return
-            lat, lon = loc
+            if resp.randomly_in_zone is not None:
+                zone = next((z for z in self.config.zones if z.label == resp.randomly_in_zone), None)
+                if zone is None:
+                    log.warning("create_waypoint: zone %r not found; skipping", resp.randomly_in_zone)
+                    return
+                lat, lon = geo.random_point_in_triangle(*zone.points)
+            elif resp.randomly_in_zone_group is not None:
+                members = self.state.get_group_members(resp.randomly_in_zone_group)
+                zone_map = {z.label: z for z in self.config.zones}
+                member_zones = [zone_map[m] for m in members if m in zone_map]
+                if not member_zones:
+                    log.warning("create_waypoint: zone_group %r has no valid zones; skipping",
+                                resp.randomly_in_zone_group)
+                    return
+                lat, lon = geo.random_point_in_triangle(*random.choice(member_zones).points)
+            else:
+                loc = self.state.get_node_location(node_id) if node_id else None
+                if loc is None:
+                    log.warning("create_waypoint: no location for node %s; skipping", node_id)
+                    return
+                lat, lon = loc
             flag_map = {f.label: f for f in self.config.flags}
             new_wp_id = self.state.create_dynamic_waypoint(lat, lon, resp.expiry_mins)
             for flag_label in resp.initial_flags:
@@ -1000,13 +1075,16 @@ class Engine:
             if resp.mesh_name is not None:
                 expire_ts = int(time.time()) + int(resp.expiry_mins * 60) if resp.expiry_mins else 0
                 mesh_wp_id = math.floor(secrets.randbits(32) * math.pow(2, -32) * 1e9)
+                wp_ctx = {"waypoint_id": mesh_wp_id}
+                mesh_name = resp.mesh_name.format(**wp_ctx)
+                mesh_description = resp.mesh_description.format(**wp_ctx) if resp.mesh_description else resp.mesh_description
                 if resp.mesh_channel:
                     ch_idx = self._resolve_channel_index(resp.mesh_channel)
                     if ch_idx is None:
                         log.warning("create_waypoint mesh broadcast: channel %r not mapped", resp.mesh_channel)
                     else:
                         from meshtastic import BROADCAST_ADDR as _BCAST
-                        def _fn(n=resp.mesh_name, d=resp.mesh_description, ic=resp.mesh_icon,
+                        def _fn(n=mesh_name, d=mesh_description, ic=resp.mesh_icon,
                                 ex=expire_ts, wid=mesh_wp_id, la=lat, lo=lon, ci=ch_idx, ba=_BCAST):
                             if self.interface is None:
                                 return
@@ -1016,20 +1094,22 @@ class Engine:
                                 destinationId=ba, channelIndex=ci,
                             )
                             log.info("create_waypoint mesh broadcast %r ch%d (id=%d)", n, ci, wid)
-                        self._send_queue.put(_fn)
+                        self._enqueue("create_waypoint", _fn)
                         self.state.set_mesh_waypoint_id_for_dynamic(new_wp_id, mesh_wp_id)
-                        if resp.mesh_label:
-                            self.state.store_mesh_waypoint(
-                                mesh_wp_id, resp.mesh_name, lat, lon,
-                                label=resp.mesh_label, expiry_mins=resp.expiry_mins,
-                            )
+                        self.state.store_mesh_waypoint(
+                            mesh_wp_id, mesh_name, lat, lon,
+                            label=resp.mesh_label, expiry_mins=resp.expiry_mins,
+                            description=mesh_description or "", icon=resp.mesh_icon,
+                            channel=resp.mesh_channel, refresh_mins=resp.refresh_mins,
+                            refresh_cooldown_mins=resp.refresh_cooldown_mins,
+                        )
                 elif resp.mesh_to_triggering_node and node_id:
                     try:
                         dest = int(node_id.lstrip("!"), 16)
                     except ValueError:
                         log.warning("create_waypoint mesh broadcast: invalid node_id %r", node_id)
                     else:
-                        def _fn(n=resp.mesh_name, d=resp.mesh_description, ic=resp.mesh_icon,
+                        def _fn(n=mesh_name, d=mesh_description, ic=resp.mesh_icon,
                                 ex=expire_ts, wid=mesh_wp_id, la=lat, lo=lon, de=dest):
                             if self.interface is None:
                                 return
@@ -1039,13 +1119,15 @@ class Engine:
                                 destinationId=de, channelIndex=0,
                             )
                             log.info("create_waypoint mesh DM %r → !%08x (id=%d)", n, de, wid)
-                        self._send_queue.put(_fn)
+                        self._enqueue("create_waypoint", _fn)
                         self.state.set_mesh_waypoint_id_for_dynamic(new_wp_id, mesh_wp_id)
-                        if resp.mesh_label:
-                            self.state.store_mesh_waypoint(
-                                mesh_wp_id, resp.mesh_name, lat, lon,
-                                label=resp.mesh_label, expiry_mins=resp.expiry_mins,
-                            )
+                        self.state.store_mesh_waypoint(
+                            mesh_wp_id, mesh_name, lat, lon,
+                            label=resp.mesh_label, expiry_mins=resp.expiry_mins,
+                            description=mesh_description or "", icon=resp.mesh_icon,
+                            refresh_mins=resp.refresh_mins,
+                            refresh_cooldown_mins=resp.refresh_cooldown_mins,
+                        )
 
         elif isinstance(resp, AddDynamicWaypointFlagResponse):
             wp_id = ctx.triggering_waypoint_id if isinstance(ctx, NodeContext) else None
@@ -1100,7 +1182,7 @@ class Engine:
                         destinationId=ba, channelIndex=ci,
                     )
                     log.info("broadcast_waypoint %r on ch%d (id=%d)", n, ci, wid)
-                self._send_queue.put(_fn)
+                self._enqueue("broadcast_waypoint", _fn)
             else:
                 node_ids = self._resolve_node_targets(resp.target, node_id, wp_id)
                 for nid in node_ids:
@@ -1118,7 +1200,7 @@ class Engine:
                             destinationId=de, channelIndex=0,
                         )
                         log.info("broadcast_waypoint %r DM → !%08x (id=%d)", n, de, wid)
-                    self._send_queue.put(_fn)
+                    self._enqueue("broadcast_waypoint", _fn)
             if resp.label:
                 self.state.store_mesh_waypoint(
                     mesh_wp_id, resp.name, lat, lon,
@@ -1142,8 +1224,57 @@ class Engine:
                     return
                 self.interface.deleteWaypoint(waypoint_id=mid)
                 log.info("delete_mesh_waypoint id=%d", mid)
-            self._send_queue.put(_fn)
+            self._enqueue("delete_mesh_waypoint", _fn)
             self.state.delete_mesh_waypoint_record(mesh_wp_id)
+
+        elif isinstance(resp, ForceRefreshWaypointResponse):
+            if node_id is None:
+                log.warning("force_refresh_waypoint: no node_id in context; skipping")
+                return
+            node_loc = self.state.get_node_location(node_id)
+            if node_loc is None:
+                log.warning("force_refresh_waypoint: no location for node %s; skipping", node_id)
+                return
+            candidates = self.state.get_live_mesh_waypoints_with_flag(resp.flag_label)
+            if not candidates:
+                return
+            def _dist(wp):
+                return geo.haversine(*node_loc, wp["lat"], wp["lon"])
+            if resp.max_meters is not None:
+                candidates = [wp for wp in candidates if _dist(wp) <= resp.max_meters]
+            if not candidates:
+                return
+            nearest = min(candidates, key=_dist)
+            wid = nearest["mesh_waypoint_id"]
+            cooldown_mins = nearest.get("refresh_cooldown_mins")
+            if cooldown_mins is not None:
+                last_str = nearest.get("last_refreshed_at")
+                if last_str:
+                    last_dt = datetime.fromisoformat(last_str)
+                    if datetime.now(timezone.utc) - last_dt < timedelta(minutes=cooldown_mins):
+                        log.debug("force_refresh_waypoint: cooldown active for wp %d", wid)
+                        return
+            ch_idx = self._resolve_channel_index(nearest["channel"]) if nearest["channel"] else None
+            if ch_idx is None:
+                log.warning("force_refresh_waypoint: channel %r not mapped for wp %d",
+                            nearest["channel"], wid)
+                return
+            from meshtastic import BROADCAST_ADDR as _BCAST
+            expire_ts = (int(datetime.fromisoformat(nearest["expires_at"]).timestamp())
+                         if nearest["expires_at"] else 0)
+            def _fn(n=nearest["name"], d=nearest["description"], ic=nearest["icon"],
+                    ex=expire_ts, wid_=wid, la=nearest["lat"], lo=nearest["lon"],
+                    ci=ch_idx, ba=_BCAST):
+                if self.interface is None:
+                    return
+                self.interface.sendWaypoint(
+                    name=n, description=d, icon=ic, expire=ex,
+                    waypoint_id=wid_, latitude=la, longitude=lo,
+                    destinationId=ba, channelIndex=ci,
+                )
+                log.info("force_refresh_waypoint broadcast %r ch%d (id=%d)", n, ci, wid_)
+            self._enqueue("force_refresh_waypoint", _fn)
+            self.state.mark_waypoints_refreshed([wid])
 
     # ------------------------------------------------------------------
     # Target resolution
@@ -1315,7 +1446,7 @@ class Engine:
             def _fn(c=chunk, d=dest):
                 self.interface.sendText(c, destinationId=d, channelIndex=0)
                 log.info("DM → %s: %r", node_id, c[:60])
-            self._send_queue.put(_fn)
+            self._enqueue("send_message", _fn)
 
     def _send_alert(self, node_id: str, text: str) -> None:
         if self._suppress_messages:
@@ -1336,7 +1467,7 @@ class Engine:
                     priority=mesh_pb2.MeshPacket.Priority.ALERT,
                 )
                 log.info("Alert → %s: %r", node_id, c[:60])
-            self._send_queue.put(_fn)
+            self._enqueue("send_alert", _fn)
 
     def _send_alert_channel(self, channel_label: str, text: str) -> None:
         if self._suppress_messages:
@@ -1355,7 +1486,7 @@ class Engine:
                     priority=mesh_pb2.MeshPacket.Priority.ALERT,
                 )
                 log.info("Alert channel[%d] broadcast: %r", i, c[:60])
-            self._send_queue.put(_fn)
+            self._enqueue("send_alert", _fn)
 
     def _resolve_channel_index(self, channel_label: str) -> int | None:
         return self.channel_index_map.get(channel_label)
@@ -1371,7 +1502,7 @@ class Engine:
             def _fn(c=chunk, i=idx):
                 self.interface.sendText(c, channelIndex=i)
                 log.info("Channel[%d] broadcast: %r", i, c[:60])
-            self._send_queue.put(_fn)
+            self._enqueue("send_message", _fn)
 
     def _request_location(self, node_id: str) -> None:
         try:
@@ -1388,7 +1519,7 @@ class Engine:
                 wantResponse=True,
             )
             log.info("Location request → %s", node_id)
-        self._send_queue.put(_fn)
+        self._enqueue("request_location", _fn)
 
     def _request_telemetry(self, node_id: str) -> None:
         try:
@@ -1408,7 +1539,7 @@ class Engine:
                 wantResponse=True,
             )
             log.info("Telemetry request → %s", node_id)
-        self._send_queue.put(_fn)
+        self._enqueue("request_telemetry", _fn)
 
     # ------------------------------------------------------------------
     # Config lookups

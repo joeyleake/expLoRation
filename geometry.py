@@ -54,6 +54,22 @@ def zone_centroid(zone: "Zone") -> tuple[float, float]:
     return sum(lats) / 3, sum(lons) / 3
 
 
+def random_point_in_triangle(
+    a: tuple[float, float],
+    b: tuple[float, float],
+    c: tuple[float, float],
+) -> tuple[float, float]:
+    """Return a uniformly random (lat, lon) point inside triangle (a, b, c)."""
+    import random
+    r1, r2 = random.random(), random.random()
+    if r1 + r2 > 1:
+        r1, r2 = 1 - r1, 1 - r2
+    return (
+        a[0] + r1 * (b[0] - a[0]) + r2 * (c[0] - a[0]),
+        a[1] + r1 * (b[1] - a[1]) + r2 * (c[1] - a[1]),
+    )
+
+
 def _point_to_segment_dist_m(
     p: tuple[float, float], a: tuple[float, float], b: tuple[float, float]
 ) -> float:

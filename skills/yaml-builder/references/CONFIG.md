@@ -866,14 +866,14 @@ duplicating event blocks.
 ```yaml
 trigger:
   type: enters_zone_group
-  zone_group: game_zones    # groups label — must be kind: zone
+  target: game_zones    # groups label — must be kind: zone
 ```
 
 | Field | Required | Description |
 |---|---|---|
-| `zone_group` | yes | A `groups` label of kind `zone` |
+| `target` | yes | A `groups` label of kind `zone` |
 
-**Note:** `target` and `zone_group` are mutually exclusive. `{zone}` in message templates resolves to the specific zone the node entered.
+**Note:** `{zone}` in message templates resolves to the specific zone the node entered.
 
 #### `leaves_zone_group` — node leaves any zone in a group
 
@@ -882,12 +882,12 @@ Fires when a node moves out of any zone that is a member of the named zone group
 ```yaml
 trigger:
   type: leaves_zone_group
-  zone_group: game_zones
+  target: game_zones
 ```
 
 | Field | Required | Description |
 |---|---|---|
-| `zone_group` | yes | A `groups` label of kind `zone` |
+| `target` | yes | A `groups` label of kind `zone` |
 
 #### `in_zone_group` — node is currently inside any group zone
 
@@ -898,12 +898,12 @@ to avoid continuous firing.
 ```yaml
 trigger:
   type: in_zone_group
-  zone_group: game_zones
+  target: game_zones
 ```
 
 | Field | Required | Description |
 |---|---|---|
-| `zone_group` | yes | A `groups` label of kind `zone` |
+| `target` | yes | A `groups` label of kind `zone` |
 
 #### `in_zone_group_on_start` — any node is in any group zone at check time
 
@@ -914,12 +914,12 @@ Group equivalent of `in_zone_on_start`.
 ```yaml
 trigger:
   type: in_zone_group_on_start
-  zone_group: game_zones
+  target: game_zones
 ```
 
 | Field | Required | Description |
 |---|---|---|
-| `zone_group` | yes | A `groups` label of kind `zone` |
+| `target` | yes | A `groups` label of kind `zone` |
 
 #### `time_window` — current time falls within a window
 
@@ -1437,27 +1437,59 @@ dynamic waypoint at their location).
   valid inside `with_node` (no triggering waypoint context).
 - `to_all_near_triggering_waypoint` is not valid inside `with_node`.
 
-#### `create_waypoint` — place a dynamic waypoint at the triggering node's location
+#### `repeat` — execute inner responses N times
 
-Creates a temporary waypoint at the current position of the triggering node.
-The waypoint can carry flags and has an optional expiry timer.
+Runs a set of inner responses a fixed number of times in sequence. Useful for
+spawning multiple independent objects (waypoints, flags) in a single event.
 
 ```yaml
+- type: repeat
+  count: 10
+  responses:
+    - type: create_waypoint
+      randomly_in_zone: open_field
+      expiry_mins: 60
+      initial_flags: [butterfly]
+```
+
+| Field | Required | Description |
+|---|---|---|
+| `count` | yes | Number of times to execute the inner responses. |
+| `responses` | yes | List of responses to execute each iteration. |
+
+#### `create_waypoint` — place a dynamic waypoint
+
+Creates a temporary waypoint that can carry flags and fire expiry events.
+The waypoint's location is determined by either the triggering node's GPS position
+or a random point sampled uniformly inside a named zone.
+
+**Node-location mode** (default):
+```yaml
 - type: create_waypoint
-  expiry_mins: 60        # optional — waypoint self-destructs after this many minutes
+  expiry_mins: 60
   initial_flags:
-    - laser_target        # flags applied to the new waypoint (must be defined in flags:)
+    - laser_target
+```
+
+**Zone-random mode** (works from any trigger, including `timed`):
+```yaml
+- type: create_waypoint
+  randomly_in_zone: open_field   # random point sampled inside the zone triangle
+  expiry_mins: 60
+  initial_flags:
+    - butterfly
 ```
 
 | Field | Required | Description |
 |---|---|---|
 | `expiry_mins` | no | Minutes until the waypoint is automatically destroyed. Omit for a permanent waypoint. |
 | `initial_flags` | no | List of flag labels to apply to the new waypoint at creation. |
+| `randomly_in_zone` | no | A `zones` label. Places the waypoint at a uniformly random point inside the zone. When set, node context is not required. |
 
-**Restriction:** `create_waypoint` requires a trigger that provides node context
-(`enters_zone`, `leaves_zone`, `near_waypoint`, `near_node`, `dm`, `channel`,
-`flag_expired` with `target_kind: node`, or inside `with_node`). It cannot
-appear directly in `time_window` or `in_zone_on_start` events.
+**Restriction:** Without `randomly_in_zone`, `create_waypoint` requires a trigger that
+provides node context (`enters_zone`, `leaves_zone`, `near_waypoint`, `near_node`,
+`dm`, `channel`, `flag_expired` with `target_kind: node`, or inside `with_node`).
+With `randomly_in_zone`, any trigger works including `timed`.
 
 #### `add_waypoint_flag` / `remove_waypoint_flag` — modify a dynamic waypoint's flags
 
