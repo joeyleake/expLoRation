@@ -1,0 +1,79 @@
+# Butterfly Hunt — Georgia Tech Campus
+# Butterflies spawn at random locations across campus. Walk within 10 meters to catch one.
+# A fresh batch of 10 spawns every 60 minutes.
+
+channels:
+  - label: comms
+    name: Testing123
+    psk: AQ==
+    monitor: true
+    participate: true
+
+zones:
+  - label: gt_campus
+    # Main Georgia Tech campus — North Ave to 5th St, Techwood to Spring St
+    points:
+      - [33.7785, -84.4005]   # northwest (Techwood Dr & 5th St)
+      - [33.7785, -84.3910]   # northeast (Spring St & 5th St)
+      - [33.7710, -84.3960]   # south (North Ave / Freshman Hill)
+
+flags:
+  - label: butterfly
+    expiry_mins: 60
+
+messages:
+  - label: caught
+    text: "🦋 {node_id} caught a wild butterfly!"
+
+events:
+  # ---------------------------------------------------------------------------
+  # Spawn 10 butterflies at start; respawn every 60 minutes
+  # ---------------------------------------------------------------------------
+  - label: spawn_butterflies
+    trigger:
+      type: time_window
+      start: "2020-01-01T00:00:00"
+      end:   "2099-01-01T00:00:00"
+    auto_recur: true
+    recur_mins: 60
+    responses:
+      - type: repeat
+        count: 10
+        responses:
+          - type: create_waypoint
+            randomly_in_zone: gt_campus
+            expiry_mins: 60
+            refresh_mins: 5        # rebroadcast every 5 minutes so all clients render it
+            initial_flags:
+              - butterfly
+            mesh_name: "wild butterfly #{waypoint_id}"
+            mesh_icon: 129419      # 🦋
+            mesh_channel: comms
+
+  # ---------------------------------------------------------------------------
+  # Catch a butterfly — walk within 10 meters
+  # ---------------------------------------------------------------------------
+  - label: catch_butterfly
+    trigger:
+      type: near_waypoint
+      target_flag: butterfly
+      meters: 10
+    responses:
+      - type: send_message
+        message_label: caught
+        to_channel: comms
+      - type: delete_mesh_waypoint
+        use_triggering_waypoint: true
+      - type: destroy_waypoint
+
+  # ---------------------------------------------------------------------------
+  # Clean up mesh waypoint when a butterfly expires naturally after 60 minutes
+  # ---------------------------------------------------------------------------
+  - label: butterfly_expired
+    trigger:
+      type: flag_expired
+      flag_label: butterfly
+      target_kind: dynamic_waypoint
+    responses:
+      - type: delete_mesh_waypoint
+        use_triggering_waypoint: true

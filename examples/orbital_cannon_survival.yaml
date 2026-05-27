@@ -361,7 +361,7 @@ events:
   - label: enter_game_zone
     trigger:
       type: enters_zone_group
-      zone_group: game_zones
+      target: game_zones
     trigger_per_node: true
     exceptions:
       - kind: node_has_flag
@@ -382,7 +382,7 @@ events:
   - label: leave_game_zone
     trigger:
       type: leaves_zone_group
-      zone_group: game_zones
+      target: game_zones
     trigger_per_node: true
     exceptions:
       - kind: node_lacks_flag

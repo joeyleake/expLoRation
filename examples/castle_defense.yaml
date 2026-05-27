@@ -201,7 +201,7 @@ events:
   - label: outer_grounds_incursion
     trigger:
       type: enters_zone_group
-      zone_group: outer_grounds
+      target: outer_grounds
     trigger_per_node: true
     responses:
       - type: add_flag
@@ -222,7 +222,7 @@ events:
   - label: moat_perimeter_breach
     trigger:
       type: enters_zone_group
-      zone_group: moat_perimeter
+      target: moat_perimeter
     trigger_per_node: true
     responses:
       - type: add_flag

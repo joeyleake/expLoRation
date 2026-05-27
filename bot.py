@@ -294,6 +294,21 @@ def _close_quietly(interface) -> None:
         pass
 
 
+def _cleanup_mesh_waypoints(interface, state: GameState, send_delay: float) -> None:
+    ids = state.get_all_live_mesh_waypoint_ids()
+    if not ids:
+        log.info("cleanup-on-exit: no mesh waypoints to remove")
+        return
+    log.info("cleanup-on-exit: removing %d mesh waypoint(s) from radio", len(ids))
+    for mid in ids:
+        try:
+            interface.deleteWaypoint(waypoint_id=mid)
+            log.info("cleanup-on-exit: deleted mesh waypoint id=%d", mid)
+        except Exception:
+            log.warning("cleanup-on-exit: failed to delete mesh waypoint id=%d", mid, exc_info=True)
+        time.sleep(send_delay)
+
+
 # ---------------------------------------------------------------------------
 # Background loops
 # ---------------------------------------------------------------------------
@@ -344,6 +359,8 @@ def parse_args() -> argparse.Namespace:
                    help="Append a JSONL record for every event that fires")
     p.add_argument("--replay-log-verbose", metavar="PATH",
                    help="Like --replay-log but also records events skipped by exceptions or limits")
+    p.add_argument("--cleanup-on-exit", action="store_true",
+                   help="Delete all expLoRation-spawned mesh waypoints from the radio before shutting down")
     return p.parse_args()
 
 
@@ -467,6 +484,9 @@ def main() -> None:
                     log.exception("Reconnect attempt %d failed — will retry", reconnect_attempt)
     except KeyboardInterrupt:
         log.info("Shutting down")
+        if args.cleanup_on_exit:
+            engine.drain_send_queue()
+            _cleanup_mesh_waypoints(interface, state, args.send_delay)
     finally:
         _close_quietly(interface)
         if replay_log_file:

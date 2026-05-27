@@ -382,7 +382,7 @@ events:
   - label: enter_arena
     trigger:
       type: enters_zone_group
-      zone_group: arena_zones   # fires when node enters any member zone
+      target: arena_zones   # fires when node enters any member zone
     trigger_per_node: true
     responses:
       - type: add_flag
@@ -549,6 +549,44 @@ For a mesh-only waypoint with no internal tracking (static marker, hint drop):
   to_channel: game_channel
 ```
 
+**Keeping mesh waypoints visible — refresh patterns:**
+Meshtastic clients don't always render every waypoint broadcast (radio congestion, missed
+packets). Use two complementary patterns to keep visual artifacts consistent for all players:
+
+*Timer-based refresh* — set `refresh_mins` on `create_waypoint` so the bot periodically
+re-broadcasts each waypoint on its original channel. The refresh order is randomized each
+cycle so congestion drops are distributed fairly rather than always hitting the same waypoints:
+
+```yaml
+- type: create_waypoint
+  randomly_in_zone: play_zone
+  expiry_mins: 60
+  initial_flags:
+    - objective
+  mesh_name: "📍 Objective #{waypoint_id}"
+  mesh_channel: game_channel
+  refresh_mins: 5          # re-broadcast every 5 minutes to all clients
+```
+
+*Event-triggered refresh* — use `force_refresh_waypoint` to immediately re-broadcast the
+nearest flagged waypoint when a node enters a zone or updates its position. This is especially
+useful on first contact, before the timer fires. A per-waypoint cooldown (default 1 min)
+prevents a crowd of simultaneous triggers from spamming the channel:
+
+```yaml
+- label: refresh_on_enter
+  trigger:
+    type: enters_zone
+    target: play_zone
+  responses:
+    - type: force_refresh_waypoint
+      flag_label: objective    # only consider waypoints with this flag
+      max_meters: 500          # optional: ignore waypoints farther than this
+```
+
+Use both together: `refresh_mins` keeps latecomers and reconnecting clients in sync over
+time, while `force_refresh_waypoint` gives arriving nodes an immediate update.
+
 **`waypoint_received` trigger** — fires when the bot receives a `WAYPOINT_APP` packet.
 Common use: scout nodes broadcast supply drops or objectives; base reacts.
 
@@ -607,7 +645,7 @@ Before outputting any YAML, mentally verify:
 
 - [ ] Every label referenced in a trigger, response, or exception is defined in its section
 - [ ] Every `near_waypoint`, `near_zone`, `near_node` trigger has `meters`
-- [ ] Every `*_zone_group` / `in_zone_group` / `in_zone_group_on_start` trigger has `zone_group` (not `target`), and the referenced group has `kind: zone`
+- [ ] Every `*_zone_group` / `in_zone_group` / `in_zone_group_on_start` trigger has `target`, and the referenced group has `kind: zone`
 - [ ] Every `channel` trigger has `channel_label`
 - [ ] Every `zone_has_flag`/`waypoint_has_flag` exception has `target` (or is in a dynamic waypoint context)
 - [ ] Every `*_in_group`/`*_not_in_group` exception has `group`; zone/waypoint group exceptions also have `target`

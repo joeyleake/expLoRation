@@ -102,10 +102,16 @@ CREATE TABLE IF NOT EXISTS mesh_waypoints (
     mesh_waypoint_id  INTEGER PRIMARY KEY,
     label             TEXT,
     name              TEXT NOT NULL,
+    description       TEXT NOT NULL DEFAULT '',
+    icon              INTEGER NOT NULL DEFAULT 0,
+    channel           TEXT,
     lat               REAL NOT NULL,
     lon               REAL NOT NULL,
     created_at        TEXT NOT NULL,
-    expires_at        TEXT
+    expires_at        TEXT,
+    refresh_mins          REAL,
+    refresh_cooldown_mins REAL,
+    last_refreshed_at     TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_node_flags_label ON node_flags(flag_label);
@@ -152,6 +158,17 @@ class GameState:
                 self._conn.commit()
             except Exception:
                 pass
+            for col in ("description TEXT NOT NULL DEFAULT ''",
+                        "icon INTEGER NOT NULL DEFAULT 0",
+                        "channel TEXT",
+                        "refresh_mins REAL",
+                        "refresh_cooldown_mins REAL",
+                        "last_refreshed_at TEXT"):
+                try:
+                    self._conn.execute(f"ALTER TABLE mesh_waypoints ADD COLUMN {col}")
+                    self._conn.commit()
+                except Exception:
+                    pass
 
     def apply_initial_groups(self, config: "GameConfig") -> None:
         node_id_by_label = {n.label: n.node_id for n in config.nodes}
@@ -338,21 +355,48 @@ class GameState:
         return expired
 
     def expire_dynamic_waypoint_flags(self) -> list[tuple[int, str]]:
-        """Delete expired flags on live dynamic waypoints.
-        Returns [(waypoint_id, flag_label), ...]. Does not touch the waypoints themselves."""
+        """Delete expired flags on dynamic waypoints.
+        Returns [(waypoint_id, flag_label), ...].
+
+        Captures flags in two cases:
+        - The flag's own expires_at has passed.
+        - The flag has an expiry and the parent waypoint's expires_at has passed
+          (handles the race where the waypoint expires milliseconds before its flag).
+        """
         now = _now_iso()
         expired: list[tuple[int, str]] = []
         with self._lock:
             rows = self._conn.execute(
-                "SELECT waypoint_id, flag_label FROM dynamic_waypoint_flags "
-                "WHERE expires_at IS NOT NULL AND expires_at <= ?",
-                (now,),
+                """
+                SELECT dwf.waypoint_id, dwf.flag_label
+                FROM dynamic_waypoint_flags dwf
+                WHERE dwf.expires_at IS NOT NULL
+                  AND (
+                      dwf.expires_at <= ?
+                      OR EXISTS (
+                          SELECT 1 FROM dynamic_waypoints dw
+                          WHERE dw.id = dwf.waypoint_id
+                            AND dw.expires_at IS NOT NULL
+                            AND dw.expires_at <= ?
+                      )
+                  )
+                """,
+                (now, now),
             ).fetchall()
             if rows:
                 self._conn.execute(
-                    "DELETE FROM dynamic_waypoint_flags "
-                    "WHERE expires_at IS NOT NULL AND expires_at <= ?",
-                    (now,),
+                    """
+                    DELETE FROM dynamic_waypoint_flags
+                    WHERE expires_at IS NOT NULL
+                      AND (
+                          expires_at <= ?
+                          OR waypoint_id IN (
+                              SELECT id FROM dynamic_waypoints
+                              WHERE expires_at IS NOT NULL AND expires_at <= ?
+                          )
+                      )
+                    """,
+                    (now, now),
                 )
                 expired.extend((row[0], row[1]) for row in rows)
                 self._conn.commit()
@@ -664,13 +708,21 @@ class GameState:
         lon: float,
         label: str | None = None,
         expiry_mins: float | None = None,
+        description: str = "",
+        icon: int = 0,
+        channel: str | None = None,
+        refresh_mins: float | None = None,
+        refresh_cooldown_mins: float | None = None,
     ) -> None:
+        now = _now_iso()
         with self._lock:
             self._conn.execute(
                 "INSERT OR REPLACE INTO mesh_waypoints"
-                "(mesh_waypoint_id, label, name, lat, lon, created_at, expires_at)"
-                " VALUES(?, ?, ?, ?, ?, ?, ?)",
-                (mesh_waypoint_id, label, name, lat, lon, _now_iso(), _expires_iso(expiry_mins)),
+                "(mesh_waypoint_id, label, name, description, icon, channel,"
+                " lat, lon, created_at, expires_at, refresh_mins, refresh_cooldown_mins, last_refreshed_at)"
+                " VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (mesh_waypoint_id, label, name, description, icon, channel,
+                 lat, lon, now, _expires_iso(expiry_mins), refresh_mins, refresh_cooldown_mins, now),
             )
             self._conn.commit()
 
@@ -724,6 +776,82 @@ class GameState:
             )
             self._conn.commit()
             return ids
+
+    def get_waypoints_due_for_refresh(self) -> list[dict]:
+        """Return mesh parameters for waypoints whose refresh interval has elapsed."""
+        now = _now_iso()
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT mesh_waypoint_id, name, description, icon, channel,
+                       lat, lon, expires_at, refresh_mins
+                FROM mesh_waypoints
+                WHERE refresh_mins IS NOT NULL
+                  AND (expires_at IS NULL OR expires_at > ?)
+                  AND datetime(last_refreshed_at,
+                               '+' || CAST(ROUND(refresh_mins * 60) AS INTEGER) || ' seconds')
+                      <= datetime(?)
+                """,
+                (now, now),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_live_mesh_waypoints_with_flag(self, flag_label: str | None) -> list[dict]:
+        """Return live mesh waypoints linked to dynamic waypoints carrying flag_label,
+        or all live mesh waypoints if flag_label is None."""
+        now = _now_iso()
+        with self._lock:
+            if flag_label is None:
+                rows = self._conn.execute(
+                    """
+                    SELECT mw.mesh_waypoint_id, mw.name, mw.description,
+                           mw.icon, mw.channel, mw.lat, mw.lon, mw.expires_at,
+                           mw.refresh_cooldown_mins, mw.last_refreshed_at
+                    FROM mesh_waypoints mw
+                    WHERE (mw.expires_at IS NULL OR mw.expires_at > ?)
+                    """,
+                    (now,),
+                ).fetchall()
+            else:
+                rows = self._conn.execute(
+                    """
+                    SELECT mw.mesh_waypoint_id, mw.name, mw.description,
+                           mw.icon, mw.channel, mw.lat, mw.lon, mw.expires_at,
+                           mw.refresh_cooldown_mins, mw.last_refreshed_at
+                    FROM mesh_waypoints mw
+                    JOIN dynamic_waypoints dw
+                      ON dw.mesh_waypoint_id = mw.mesh_waypoint_id
+                    JOIN dynamic_waypoint_flags dwf
+                      ON dwf.waypoint_id = dw.id
+                    WHERE dwf.flag_label = ?
+                      AND (mw.expires_at IS NULL OR mw.expires_at > ?)
+                      AND (dwf.expires_at IS NULL OR dwf.expires_at > ?)
+                    """,
+                    (flag_label, now, now),
+                ).fetchall()
+            return [dict(r) for r in rows]
+
+    def mark_waypoints_refreshed(self, mesh_waypoint_ids: list[int]) -> None:
+        if not mesh_waypoint_ids:
+            return
+        now = _now_iso()
+        placeholders = ",".join("?" * len(mesh_waypoint_ids))
+        with self._lock:
+            self._conn.execute(
+                f"UPDATE mesh_waypoints SET last_refreshed_at=?"
+                f" WHERE mesh_waypoint_id IN ({placeholders})",
+                [now, *mesh_waypoint_ids],
+            )
+            self._conn.commit()
+
+    def get_all_live_mesh_waypoint_ids(self) -> list[int]:
+        """Return all mesh waypoint IDs currently tracked in state (for cleanup on exit)."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT mesh_waypoint_id FROM dynamic_waypoints WHERE mesh_waypoint_id IS NOT NULL"
+                " UNION SELECT mesh_waypoint_id FROM mesh_waypoints"
+            ).fetchall()
+        return [r[0] for r in rows]
 
     def get_dynamic_waypoint_count(self) -> int:
         now = _now_iso()

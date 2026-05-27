@@ -10,7 +10,7 @@ from config import (
     SendMessageResponse, SendAlertResponse, AddFlagResponse, RemoveFlagResponse,
     RequestLocationResponse, RequestTelemetryResponse,
     SetVariableResponse, IncrementVariableResponse,
-    RandomOptionsResponse, RandomOption, WithNodeResponse,
+    RandomOptionsResponse, RandomOption, WithNodeResponse, RepeatResponse,
     CreateWaypointResponse, AddDynamicWaypointFlagResponse, DestroyWaypointResponse,
     EnableEventResponse, DisableEventResponse,
     TargetTriggeringNode, TargetChannel, TargetFlag, TargetAllWithFlag, TargetGroup,
@@ -2810,3 +2810,97 @@ def test_auto_recur_fires_after_interval(db):
     _time.sleep(0.1)
     eng.handle_periodic()   # recur interval passed → auto_recur fires → score=2
     assert db.get_mutable_variable("score") == 2
+
+
+# ---------------------------------------------------------------------------
+# RepeatResponse + randomly_in_zone
+# ---------------------------------------------------------------------------
+
+def test_repeat_response_executes_n_times(db):
+    from config import TimedTrigger
+    from datetime import datetime, timezone
+    now_utc = datetime.now(timezone.utc)
+    cfg = minimal_config(
+        events=[
+            Event(
+                label="spam",
+                trigger=TimedTrigger(
+                    start=now_utc.replace(year=2020),
+                    end=now_utc.replace(year=2099),
+                ),
+                responses=[
+                    RepeatResponse(
+                        count=4,
+                        responses=[
+                            IncrementVariableResponse(variable_label="score", amount=1)
+                        ],
+                    )
+                ],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db)
+    eng.handle_periodic()
+    assert db.get_mutable_variable("score") == 4
+
+
+def _get_all_dynamic_waypoints(db):
+    """Return list of (id, lat, lon) for all dynamic waypoints in the DB."""
+    with db._lock:
+        rows = db._conn.execute("SELECT id, lat, lon FROM dynamic_waypoints").fetchall()
+    return rows
+
+
+def test_create_waypoint_randomly_in_zone_places_inside_zone(db):
+    import geometry as geo
+    from config import TimedTrigger
+    from datetime import datetime, timezone
+    now_utc = datetime.now(timezone.utc)
+    cfg = minimal_config(
+        events=[
+            Event(
+                label="spawn",
+                trigger=TimedTrigger(
+                    start=now_utc.replace(year=2020),
+                    end=now_utc.replace(year=2099),
+                ),
+                responses=[
+                    CreateWaypointResponse(randomly_in_zone="zone_a")
+                ],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db)
+    eng.handle_periodic()
+    wps = _get_all_dynamic_waypoints(db)
+    assert len(wps) == 1
+    _, lat, lon = wps[0]
+    a, b, c = ZONE_POINTS
+    assert geo.point_in_triangle((lat, lon), a, b, c), \
+        f"Waypoint ({lat}, {lon}) not inside zone triangle"
+
+
+def test_create_waypoint_randomly_in_zone_no_node_required(db):
+    """randomly_in_zone create_waypoint fires from a timed trigger with no node location."""
+    from config import TimedTrigger
+    from datetime import datetime, timezone
+    now_utc = datetime.now(timezone.utc)
+    cfg = minimal_config(
+        events=[
+            Event(
+                label="spawn",
+                trigger=TimedTrigger(
+                    start=now_utc.replace(year=2020),
+                    end=now_utc.replace(year=2099),
+                ),
+                responses=[
+                    CreateWaypointResponse(randomly_in_zone="zone_a")
+                ],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db)
+    # No node location stored — should succeed without skipping
+    eng.handle_periodic()
+    wps = _get_all_dynamic_waypoints(db)
+    assert len(wps) == 1

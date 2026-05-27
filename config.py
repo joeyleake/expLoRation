@@ -337,9 +337,17 @@ class WithNodeResponse:
 
 
 @dataclass
+class RepeatResponse:
+    count: int
+    responses: list   # list[Response]
+
+
+@dataclass
 class CreateWaypointResponse:
     expiry_mins: float | None = None
     initial_flags: list[str] = field(default_factory=list)
+    randomly_in_zone: str | None = None            # place at a random point inside this zone
+    randomly_in_zone_group: str | None = None      # pick a random zone from the group, then a random point
     # Optional: also push to the Meshtastic mesh map
     mesh_name: str | None = None
     mesh_description: str = ""
@@ -347,6 +355,8 @@ class CreateWaypointResponse:
     mesh_channel: str | None = None        # channel label — broadcast to channel
     mesh_to_triggering_node: bool = False  # DM to triggering node
     mesh_label: str | None = None          # store for label-based deletion later
+    refresh_mins: float | None = None          # rebroadcast to mesh every N minutes
+    refresh_cooldown_mins: float | None = None  # minimum gap between force_refresh_waypoint re-broadcasts
 
 
 @dataclass
@@ -382,6 +392,12 @@ class DeleteMeshWaypointResponse:
     use_triggering_waypoint: bool = False
 
 
+@dataclass
+class ForceRefreshWaypointResponse:
+    flag_label: str | None = None
+    max_meters: float | None = None
+
+
 Response = (
     SendMessageResponse
     | SendAlertResponse
@@ -398,12 +414,14 @@ Response = (
     | IncrementVariableResponse
     | RandomOptionsResponse
     | WithNodeResponse
+    | RepeatResponse
     | CreateWaypointResponse
     | AddDynamicWaypointFlagResponse
     | RemoveDynamicWaypointFlagResponse
     | DestroyWaypointResponse
     | BroadcastWaypointResponse
     | DeleteMeshWaypointResponse
+    | ForceRefreshWaypointResponse
 )
 
 
@@ -545,16 +563,27 @@ def _parse_response(raw: dict) -> Response:
             target=_parse_target(raw),
             responses=[_parse_response(r) for r in raw.get("responses", [])],
         )
+    if kind == "repeat":
+        if "count" not in raw:
+            raise ConfigError("repeat response requires 'count'")
+        return RepeatResponse(
+            count=int(raw["count"]),
+            responses=[_parse_response(r) for r in raw.get("responses", [])],
+        )
     if kind == "create_waypoint":
         return CreateWaypointResponse(
             expiry_mins=float(raw["expiry_mins"]) if "expiry_mins" in raw else None,
             initial_flags=raw.get("initial_flags", []),
+            randomly_in_zone=raw.get("randomly_in_zone"),
+            randomly_in_zone_group=raw.get("randomly_in_zone_group"),
             mesh_name=raw.get("mesh_name"),
             mesh_description=raw.get("mesh_description", ""),
             mesh_icon=int(raw.get("mesh_icon", 0)),
             mesh_channel=raw.get("mesh_channel"),
             mesh_to_triggering_node=bool(raw.get("mesh_to_triggering_node", False)),
             mesh_label=raw.get("mesh_label"),
+            refresh_mins=float(raw["refresh_mins"]) if "refresh_mins" in raw else None,
+            refresh_cooldown_mins=float(raw["refresh_cooldown_mins"]) if "refresh_cooldown_mins" in raw else None,
         )
     if kind == "broadcast_waypoint":
         if "name" not in raw:
@@ -580,6 +609,11 @@ def _parse_response(raw: dict) -> Response:
         return RemoveDynamicWaypointFlagResponse(flag_label=raw["flag_label"])
     if kind == "destroy_waypoint":
         return DestroyWaypointResponse()
+    if kind == "force_refresh_waypoint":
+        return ForceRefreshWaypointResponse(
+            flag_label=raw.get("flag_label"),
+            max_meters=float(raw["max_meters"]) if "max_meters" in raw else None,
+        )
     raise ConfigError(f"Unknown response type: {kind!r}")
 
 
@@ -592,7 +626,7 @@ def _parse_trigger(raw: dict):
             target_label=raw.get("target"),
             target_flag=raw.get("target_flag"),
             meters=float(raw["meters"]) if "meters" in raw else None,
-            zone_group=raw.get("zone_group"),
+            zone_group=raw.get("target"),
         )
     if kind == "time_window":
         return TimedTrigger(
@@ -848,15 +882,13 @@ def _validate(cfg: GameConfig) -> None:
                 _ZONE_GROUP_KINDS = ("enters_zone_group", "leaves_zone_group", "in_zone_group", "in_zone_group_on_start")
                 if t.kind in _ZONE_GROUP_KINDS:
                     if t.zone_group is None:
-                        raise ConfigError(f"{ctx} trigger {t.kind!r} requires 'zone_group'")
-                    if t.target_label is not None:
-                        raise ConfigError(f"{ctx} trigger {t.kind!r}: use 'zone_group', not 'target'")
+                        raise ConfigError(f"{ctx} trigger {t.kind!r} requires 'target'")
                     _check_label(t.zone_group, group_labels, f"{ctx} trigger")
                     if group_kind.get(t.zone_group) != "zone":
                         raise ConfigError(f"{ctx} trigger {t.kind!r}: group {t.zone_group!r} must be kind 'zone'")
                 elif t.kind in ("near_zone", "in_zone_on_start", "in_zone", "enters_zone", "leaves_zone"):
                     if t.zone_group is not None:
-                        raise ConfigError(f"{ctx} trigger {t.kind!r}: 'zone_group' is only valid on zone_group trigger kinds")
+                        raise ConfigError(f"{ctx} trigger {t.kind!r}: 'target' must be a zone label, not a group")
                     _check_label(t.target_label, zone_labels, f"{ctx} trigger")
                 elif t.kind == "near_node":
                     _check_label(t.target_label, node_labels, f"{ctx} trigger")
@@ -941,8 +973,16 @@ def _validate(cfg: GameConfig) -> None:
                         f"{ctx}: to_triggering_node is not valid for this trigger type (no node context)"
                     )
             if isinstance(resp, CreateWaypointResponse):
-                if not _has_node_context:
-                    raise ConfigError(f"{ctx}: create_waypoint requires a trigger that provides node context")
+                if resp.randomly_in_zone is not None and resp.randomly_in_zone_group is not None:
+                    raise ConfigError(f"{ctx}: create_waypoint randomly_in_zone and randomly_in_zone_group are mutually exclusive")
+                if resp.randomly_in_zone is not None:
+                    _check_label(resp.randomly_in_zone, zone_labels, f"{ctx} create_waypoint randomly_in_zone")
+                elif resp.randomly_in_zone_group is not None:
+                    _check_label(resp.randomly_in_zone_group, group_labels, f"{ctx} create_waypoint randomly_in_zone_group")
+                    if group_kind.get(resp.randomly_in_zone_group) != "zone":
+                        raise ConfigError(f"{ctx}: create_waypoint randomly_in_zone_group: group {resp.randomly_in_zone_group!r} must be kind 'zone'")
+                elif not _has_node_context:
+                    raise ConfigError(f"{ctx}: create_waypoint without randomly_in_zone requires a trigger that provides node context")
                 if resp.mesh_name is not None:
                     if len(resp.mesh_name) > 30:
                         raise ConfigError(f"{ctx}: create_waypoint mesh_name exceeds 30-character Meshtastic limit")

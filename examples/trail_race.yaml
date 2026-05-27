@@ -187,7 +187,7 @@ events:
   - label: greet_runner
     trigger:
       type: enters_zone_group
-      zone_group: start_corral
+      target: start_corral
     trigger_per_node: true
     responses:
       - type: send_message

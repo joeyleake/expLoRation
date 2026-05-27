@@ -185,7 +185,7 @@ events:
   - label: tour_welcome_event
     trigger:
       type: enters_zone_group
-      zone_group: tour_start
+      target: tour_start
     trigger_per_node: true
     responses:
       - type: add_flag
