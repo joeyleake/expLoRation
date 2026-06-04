@@ -27,7 +27,7 @@ from config import (
     CreateWaypointResponse, AddDynamicWaypointFlagResponse,
     RemoveDynamicWaypointFlagResponse, DestroyWaypointResponse,
     BroadcastWaypointResponse, DeleteMeshWaypointResponse, ForceRefreshWaypointResponse,
-    TrackReceivedWaypointResponse,
+    TrackReceivedWaypointResponse, SendReportResponse, ReportDef,
     TargetTriggeringNode, TargetNode, TargetZone, TargetFlag,
     TargetWaypointRadius, TargetAllInZone, TargetAllWithFlag,
     TargetAllNearWaypoint, TargetAllNearTriggeringWaypoint, TargetAllNearNode, TargetChannel, TargetGroup,
@@ -1324,6 +1324,19 @@ class Engine:
             log.info("track_received_waypoint: created dynamic wp %d at %.5f,%.5f",
                      new_wp_id, ctx.waypoint_lat, ctx.waypoint_lon)
 
+        elif isinstance(resp, SendReportResponse):
+            report = next((r for r in self.config.reports if r.label == resp.report_label), None)
+            if report is None:
+                log.warning("send_report: report %r not found", resp.report_label)
+                return
+            text = self._render_report(report)
+            if isinstance(resp.target, TargetChannel):
+                self._send_channel(resp.target.channel_label, text)
+            else:
+                nodes = self._resolve_node_targets(resp.target, node_id, wp_id)
+                for nid in nodes:
+                    self._send_dm(nid, text)
+
     # ------------------------------------------------------------------
     # Target resolution
     # ------------------------------------------------------------------
@@ -1535,6 +1548,75 @@ class Engine:
                 )
                 log.info("Alert channel[%d] broadcast: %r", i, c[:60])
             self._enqueue("send_alert", _fn)
+
+    def _resolve_report_column(self, source: str, node_id: str) -> str:
+        if source == "node_id":
+            return node_id
+        if source == "node_shortname":
+            info = (self.interface.nodes or {}).get(node_id, {}) if self.interface else {}
+            return info.get("user", {}).get("shortName", "").strip() or node_id
+        if source == "node_longname":
+            info = (self.interface.nodes or {}).get(node_id, {}) if self.interface else {}
+            return info.get("user", {}).get("longName", "").strip() or node_id
+        mv_def = self._mutable_var_defs.get(source)
+        if mv_def is not None:
+            val = self.state.get_mutable_variable(source, node_id)
+            if val is None:
+                val = mv_def.initial
+            return str(val) if val is not None else "—"
+        return "—"
+
+    def _render_report(self, report: ReportDef) -> str:
+        node_values = self.state.get_all_node_variable_values(report.sort_by)
+        # build set of node_ids already in DB
+        db_nodes = {nid for nid, _ in node_values}
+        # include nodes that have the sort variable in DB; exclude global (empty node_id)
+        reverse = (report.sort_order == "desc")
+        def _sort_key(item):
+            v = item[1]
+            # None sorts last regardless of direction
+            if v is None:
+                return (1, 0)
+            return (0, v) if not reverse else (0, -v if isinstance(v, (int, float)) else v)
+        sorted_rows = sorted(node_values, key=_sort_key)
+        if reverse:
+            sorted_rows = sorted(node_values,
+                key=lambda x: (x[1] is None, -(x[1]) if isinstance(x[1], (int, float)) else x[1] if x[1] is not None else ""))
+        else:
+            sorted_rows = sorted(node_values,
+                key=lambda x: (x[1] is None, x[1] if x[1] is not None else ""))
+        sorted_rows = sorted_rows[:report.rows]
+        # resolve all cell values
+        cell_grid: list[list[str]] = []
+        for node_id, _ in sorted_rows:
+            row_cells = [self._resolve_report_column(col.source, node_id) for col in report.columns]
+            cell_grid.append(row_cells)
+        # compute column widths for alignment
+        if report.align and cell_grid and report.columns:
+            headers = [col.header or col.source for col in report.columns]
+            col_widths = [max(len(h), max((len(row[i]) for row in cell_grid), default=0))
+                          for i, h in enumerate(headers)]
+            # determine if column is numeric (majority of values are numeric)
+            def _is_numeric_col(col_idx: int) -> bool:
+                vals = [row[col_idx] for row in cell_grid]
+                numeric = sum(1 for v in vals if v.lstrip("-").replace(".", "", 1).isdigit())
+                return numeric > len(vals) / 2
+            numeric_cols = [_is_numeric_col(i) for i in range(len(report.columns))]
+        lines = []
+        if report.title:
+            lines.append(report.title)
+        for rank, (row_cells, (node_id, _)) in enumerate(zip(cell_grid, sorted_rows), 1):
+            if report.align and cell_grid and report.columns:
+                padded = []
+                for i, cell in enumerate(row_cells):
+                    w = col_widths[i]
+                    padded.append(cell.rjust(w) if numeric_cols[i] else cell.ljust(w))
+                lines.append(f"{rank}. {' '.join(padded)}")
+            else:
+                lines.append(f"{rank}. {' '.join(row_cells)}")
+        if not sorted_rows:
+            lines.append("(no data)")
+        return "\n".join(lines)
 
     def _resolve_channel_index(self, channel_label: str) -> int | None:
         return self.channel_index_map.get(channel_label)

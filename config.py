@@ -406,6 +406,12 @@ class TrackReceivedWaypointResponse:
     expiry_mins: float | None = None  # None = derive from packet expire; 0 packet = no expiry
 
 
+@dataclass
+class SendReportResponse:
+    report_label: str
+    target: "Target"
+
+
 Response = (
     SendMessageResponse
     | SendAlertResponse
@@ -431,6 +437,7 @@ Response = (
     | DeleteMeshWaypointResponse
     | ForceRefreshWaypointResponse
     | TrackReceivedWaypointResponse
+    | SendReportResponse
 )
 
 
@@ -474,6 +481,23 @@ class Event:
 # ---------------------------------------------------------------------------
 
 @dataclass
+class ReportColumn:
+    source: str              # node_id | node_shortname | node_longname | mutable variable label
+    header: str | None = None
+
+
+@dataclass
+class ReportDef:
+    label: str
+    sort_by: str             # mutable variable label (scope: node)
+    title: str | None = None
+    rows: int = 5
+    sort_order: str = "desc" # "asc" | "desc"
+    columns: list[ReportColumn] = field(default_factory=list)
+    align: bool = True
+
+
+@dataclass
 class GameConfig:
     channels: list[Channel] = field(default_factory=list)
     zones: list[Zone] = field(default_factory=list)
@@ -484,6 +508,7 @@ class GameConfig:
     groups: list[GroupDef] = field(default_factory=list)
     variables: list[Variable] = field(default_factory=list)
     mutable_variables: list[MutableVariableDef] = field(default_factory=list)
+    reports: list[ReportDef] = field(default_factory=list)
     events: list[Event] = field(default_factory=list)
 
 
@@ -630,6 +655,10 @@ def _parse_response(raw: dict) -> Response:
             placer_flag=raw.get("placer_flag"),
             expiry_mins=float(raw["expiry_mins"]) if "expiry_mins" in raw else None,
         )
+    if kind == "send_report":
+        if "report_label" not in raw:
+            raise ConfigError("send_report requires 'report_label'")
+        return SendReportResponse(report_label=raw["report_label"], target=_parse_target(raw))
     raise ConfigError(f"Unknown response type: {kind!r}")
 
 
@@ -873,6 +902,23 @@ def _validate(cfg: GameConfig) -> None:
         if mv.max is not None and mv.initial > mv.max:
             raise ConfigError(f"{mvctx}: initial must be <= max")
 
+    _REPORT_BUILTIN_SOURCES = frozenset({"node_id", "node_shortname", "node_longname"})
+    report_labels = {r.label for r in cfg.reports}
+    for rpt in cfg.reports:
+        rctx = f"Report {rpt.label!r}"
+        if rpt.sort_by not in mutable_var_labels:
+            raise ConfigError(f"{rctx}: sort_by {rpt.sort_by!r} not defined in mutable_variables")
+        mv = mutable_var_def_map.get(rpt.sort_by)
+        if mv and mv.scope != "node":
+            raise ConfigError(f"{rctx}: sort_by variable must have scope: node")
+        if rpt.sort_order not in ("asc", "desc"):
+            raise ConfigError(f"{rctx}: sort_order must be 'asc' or 'desc'")
+        if rpt.rows < 1:
+            raise ConfigError(f"{rctx}: rows must be >= 1")
+        for col in rpt.columns:
+            if col.source not in _REPORT_BUILTIN_SOURCES and col.source not in mutable_var_labels:
+                raise ConfigError(f"{rctx}: column source {col.source!r} is not a built-in token or mutable variable")
+
     _GROUP_KINDS = ("node", "zone", "waypoint")
     _member_pool = {"node": node_labels, "zone": zone_labels, "waypoint": waypoint_labels}
     for grp in cfg.groups:
@@ -1054,6 +1100,8 @@ def _validate(cfg: GameConfig) -> None:
                     _check_label(flag_label, flag_labels, f"{ctx} track_received_waypoint initial_flags")
                 if resp.placer_flag:
                     _check_label(resp.placer_flag, flag_labels, f"{ctx} track_received_waypoint placer_flag")
+            if isinstance(resp, SendReportResponse):
+                _check_label(resp.report_label, report_labels, f"{ctx} send_report report_label")
             if isinstance(resp, (AddDynamicWaypointFlagResponse, RemoveDynamicWaypointFlagResponse)):
                 if not _can_add_remove_waypoint_flag:
                     raise ConfigError(
@@ -1312,6 +1360,21 @@ def load_config(path: str) -> GameConfig:
                 max_length=mv.get("max_length"),
             )
             for mv in raw.get("mutable_variables", [])
+        ],
+        reports=[
+            ReportDef(
+                label=r["label"],
+                sort_by=r["sort_by"],
+                title=r.get("title"),
+                rows=int(r.get("rows", 5)),
+                sort_order=r.get("sort_order", "desc"),
+                columns=[
+                    ReportColumn(source=c["source"], header=c.get("header"))
+                    for c in r.get("columns", [])
+                ],
+                align=bool(r.get("align", True)),
+            )
+            for r in raw.get("reports", [])
         ],
         events=[_parse_event(e) for e in raw.get("events", [])],
     )

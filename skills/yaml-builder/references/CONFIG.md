@@ -671,6 +671,62 @@ mutable_variables:
 
 ---
 
+## Reports
+
+`reports:` defines named report templates for leaderboards and status summaries.
+Each report is rendered by a `send_report` response and sent as one or more text
+messages (split at the 200-byte engine limit). All columns are per-node: each row
+is one Meshtastic node ranked by a mutable variable.
+
+```yaml
+reports:
+  - label: kill_board
+    title: "🏆 Top Zombie Hunters"   # optional header line
+    sort_by: zombie_kills             # mutable variable label (scope: node)
+    sort_order: desc                  # asc | desc (default: desc)
+    rows: 5                           # max rows to display (default: 5)
+    align: true                       # pad columns for alignment (default: true)
+    columns:
+      - source: node_shortname        # built-in: 4-char Meshtastic callsign
+        header: Name
+      - source: zombie_kills          # mutable variable label
+        header: Kills
+```
+
+**Column `source` values:**
+
+| Value | Description |
+|---|---|
+| `node_id` | Raw hex node ID (e.g. `!8f7edab6`) |
+| `node_shortname` | 4-character callsign from the radio's nodedb |
+| `node_longname` | Full display name from the radio's nodedb |
+| Any mutable variable label | The node's current value for that variable |
+
+**Output format** with `align: true` (default): text columns are left-aligned, numeric
+columns are right-aligned, all padded to their column's max width:
+
+```
+🏆 Top Zombie Hunters
+1. Eelshop    12
+2. ABCD        8
+3. !ff001122   3
+```
+
+| Field | Required | Description |
+|---|---|---|
+| `label` | yes | Unique identifier referenced by `send_report` responses. |
+| `sort_by` | yes | Mutable variable label (scope: node) to rank rows by. |
+| `title` | no | Optional header line prepended to the output. |
+| `rows` | no | Maximum rows to display (default: 5). |
+| `sort_order` | no | `desc` (default) or `asc`. |
+| `columns` | yes | Ordered list of columns. Each has `source` (required) and `header` (optional). |
+| `align` | no | Auto-align columns with padding (default: `true`). Set `false` for compact output. |
+
+Nodes with no DB record for the `sort_by` variable are excluded from the report. Use
+`send_report` to dispatch a report in any event response.
+
+---
+
 ## Events
 
 Events are the core of the game logic. Each event has a single **trigger**, one
@@ -1460,10 +1516,9 @@ spawning multiple independent objects (waypoints, flags) in a single event.
 #### `create_waypoint` — place a dynamic waypoint
 
 Creates a temporary waypoint that can carry flags and fire expiry events.
-The waypoint's location is determined by either the triggering node's GPS position
-or a random point sampled uniformly inside a named zone.
+The waypoint's location is determined by one of four placement options.
 
-**Node-location mode** (default):
+**Node-location mode** (default — uses triggering node's GPS position):
 ```yaml
 - type: create_waypoint
   expiry_mins: 60
@@ -1471,25 +1526,49 @@ or a random point sampled uniformly inside a named zone.
     - laser_target
 ```
 
-**Zone-random mode** (works from any trigger, including `timed`):
+**Zone-random mode** (random point inside a named zone triangle; works from any trigger):
 ```yaml
 - type: create_waypoint
-  randomly_in_zone: open_field   # random point sampled inside the zone triangle
+  randomly_in_zone: open_field
   expiry_mins: 60
   initial_flags:
     - butterfly
 ```
 
+**Zone-group-random mode** (picks a random zone from the group, then a random point in it):
+```yaml
+- type: create_waypoint
+  randomly_in_zone_group: play_area
+  expiry_mins: 60
+  initial_flags:
+    - objective
+```
+
+**Near-location mode** (within N meters of the triggering waypoint, or node if no waypoint in context):
+```yaml
+- type: create_waypoint
+  randomly_near_location: 30   # radius in meters
+  expiry_mins: 60
+  initial_flags:
+    - zombie
+```
+
+`randomly_near_location` is ideal for spawning near a game object — e.g. a replacement
+zombie near the one just killed. Combine with `with_node` to spawn near a specific player.
+
+The four placement options are mutually exclusive.
+
 | Field | Required | Description |
 |---|---|---|
-| `expiry_mins` | no | Minutes until the waypoint is automatically destroyed. Omit for a permanent waypoint. |
-| `initial_flags` | no | List of flag labels to apply to the new waypoint at creation. |
-| `randomly_in_zone` | no | A `zones` label. Places the waypoint at a uniformly random point inside the zone. When set, node context is not required. |
+| `expiry_mins` | no | Minutes until the waypoint is automatically destroyed. Omit for permanent. |
+| `initial_flags` | no | List of flag labels to apply at creation. |
+| `randomly_in_zone` | no | `zones` label — uniform random point inside the zone triangle. No node context required. |
+| `randomly_in_zone_group` | no | `groups` label (kind: zone) — random member zone, then random point in it. No node context required. |
+| `randomly_near_location` | no | Radius in meters. Spawns near triggering waypoint (if any), else triggering node. |
 
-**Restriction:** Without `randomly_in_zone`, `create_waypoint` requires a trigger that
-provides node context (`enters_zone`, `leaves_zone`, `near_waypoint`, `near_node`,
-`dm`, `channel`, `flag_expired` with `target_kind: node`, or inside `with_node`).
-With `randomly_in_zone`, any trigger works including `timed`.
+**Restriction:** Without a `randomly_*` field, `create_waypoint` requires a trigger that
+provides node context. With `randomly_in_zone` or `randomly_in_zone_group`, any trigger
+including `timed` works.
 
 #### `add_waypoint_flag` / `remove_waypoint_flag` — modify a dynamic waypoint's flags
 
@@ -1532,28 +1611,36 @@ without needing a label.
 
 ```yaml
 - type: create_waypoint
+  randomly_in_zone: gt_campus
   expiry_mins: 60
   initial_flags:
-    - laser_target
-  # Optional mesh broadcast fields:
-  mesh_name: "🛰️ TARGET LOCK"      # required to enable mesh push; max 30 chars
-  mesh_description: "Evac now."    # optional; max 100 chars
-  mesh_icon: 0                     # optional icon (Meshtastic icon code, default 0)
-  mesh_channel: game_channel       # broadcast to this channel (mutually exclusive with mesh_to_triggering_node)
-  mesh_to_triggering_node: false   # DM the waypoint to the triggering node instead
-  mesh_label: cannon_target        # optional label for later label-based deletion
+    - butterfly
+  mesh_name: "🦋 butterfly #{waypoint_id}"  # {waypoint_id} expands to the mesh waypoint's numeric ID
+  mesh_description: "Catch me!"
+  mesh_icon: 129419                          # Unicode code point for 🦋
+  mesh_channel: comms
+  refresh_mins: 5            # re-broadcast the waypoint every 5 minutes
+  refresh_cooldown_mins: 2   # minimum gap between force_refresh_waypoint re-broadcasts
+  mesh_label: my_wp          # optional — enables label-based deletion later
 ```
+
+`{waypoint_id}` in `mesh_name` and `mesh_description` is replaced with the numeric mesh
+waypoint ID at creation, making each name unique within a batch.
+
+`refresh_mins` keeps the waypoint visible to clients that missed the initial broadcast.
+`refresh_cooldown_mins` prevents `force_refresh_waypoint` events from flooding the channel
+when many players arrive simultaneously.
 
 | Field | Required | Description |
 |---|---|---|
-| `mesh_name` | yes (to enable) | Enables mesh push. Name shown on client maps; max 30 characters. |
-| `mesh_description` | no | Description shown in client popups; max 100 characters. |
-| `mesh_icon` | no | Meshtastic icon code; default 0. |
+| `mesh_name` | yes (to enable) | Enables mesh push. Name shown on client maps; max 30 characters. `{waypoint_id}` is replaced with the waypoint's numeric ID. |
+| `mesh_description` | no | Description shown in client popups; max 100 characters. `{waypoint_id}` supported. |
+| `mesh_icon` | no | Unicode code point for the icon emoji; default 0. Use `ord("🦋")` in Python to find values. |
 | `mesh_channel` | one of | Broadcast channel label. Mutually exclusive with `mesh_to_triggering_node`. |
 | `mesh_to_triggering_node` | one of | If true, DM the waypoint to the triggering node instead of broadcasting. |
-| `mesh_label` | no | Store this waypoint in `mesh_waypoints` table under this label for later `delete_mesh_waypoint: label:` use. |
-
-**Note:** The waypoint is placed at the triggering node's last known location. If no location is known, the mesh push is skipped (the internal dynamic waypoint is still created).
+| `mesh_label` | no | Store this waypoint under this label for later `delete_mesh_waypoint: label:` use. |
+| `refresh_mins` | no | Re-broadcast the waypoint on its channel every N minutes. Helps clients that missed the initial send. |
+| `refresh_cooldown_mins` | no | Minimum minutes between `force_refresh_waypoint` re-broadcasts for this waypoint. Prevents crowd-triggered spam. |
 
 ---
 
@@ -1635,6 +1722,46 @@ waypoint as the triggering waypoint.
 **Context note:** `delete_mesh_waypoint use_triggering_waypoint: true` works after
 `track_received_waypoint` because the response links the original `mesh_waypoint_id`
 from the packet to the newly created `dynamic_waypoint`.
+
+---
+
+#### `force_refresh_waypoint` — immediately re-broadcast the nearest flagged mesh waypoint
+
+Re-broadcasts the nearest live mesh waypoint (filtered by `flag_label`) on its original
+channel. Useful on zone entry to push a waypoint to clients that haven't rendered it yet.
+A per-waypoint cooldown (`refresh_cooldown_mins` on `create_waypoint`) prevents a crowd
+of simultaneous triggers from flooding the channel.
+
+```yaml
+- type: force_refresh_waypoint
+  flag_label: butterfly    # only consider waypoints with this flag (optional)
+  max_meters: 300          # ignore waypoints farther than this from the triggering node (optional)
+```
+
+| Field | Required | Description |
+|---|---|---|
+| `flag_label` | no | Only consider waypoints whose linked dynamic waypoint carries this flag. Omit to consider all live mesh waypoints. |
+| `max_meters` | no | Ignore waypoints farther than this from the triggering node's current location. |
+
+The cooldown is stored on the waypoint via `refresh_cooldown_mins` in `create_waypoint`,
+not on this response — so one configuration governs all force-refresh events.
+
+---
+
+#### `send_report` — broadcast a formatted report
+
+Renders a `reports:` definition and sends it as a message. Accepts any standard target.
+
+```yaml
+- type: send_report
+  report_label: kill_board
+  to_channel: comms
+```
+
+| Field | Required | Description |
+|---|---|---|
+| `report_label` | yes | A label defined in the `reports:` section. |
+| target key | yes | One standard target key (see Targets). |
 
 ---
 

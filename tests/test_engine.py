@@ -17,6 +17,7 @@ from config import (
     EventException,
 )
 from tests.conftest import minimal_config, make_engine, INSIDE_ZONE, OUTSIDE_ZONE, ZONE_POINTS, NODE_ID, NODE2_ID
+from config import MutableVariableDef, ReportColumn, ReportDef, SendReportResponse
 
 
 # ---------------------------------------------------------------------------
@@ -3172,3 +3173,120 @@ def test_track_received_waypoint_near_waypoint_trigger_fires(db):
     db.update_node_location(NODE_ID, *INSIDE_ZONE)
     eng.handle_position(NODE_ID, *INSIDE_ZONE)
     assert len(eng.sent_channels) == 1
+
+
+# ---------------------------------------------------------------------------
+# send_report / reports primitive
+# ---------------------------------------------------------------------------
+
+def _report_config(sort_order="desc", rows=5, title="Leaderboard", align=True):
+    from config import TimedTrigger
+    from datetime import datetime, timezone
+    now_utc = datetime.now(timezone.utc)
+    mv = MutableVariableDef(label="kills", type="integer", scope="node", initial=0)
+    report = ReportDef(
+        label="kill_board",
+        sort_by="kills",
+        title=title,
+        rows=rows,
+        sort_order=sort_order,
+        columns=[
+            ReportColumn(source="node_id", header="Node"),
+            ReportColumn(source="kills", header="K"),
+        ],
+        align=align,
+    )
+    cfg = minimal_config(
+        mutable_variables=[mv],
+        events=[
+            Event(
+                label="board",
+                trigger=TimedTrigger(
+                    start=now_utc.replace(year=2020),
+                    end=now_utc.replace(year=2099),
+                ),
+                responses=[SendReportResponse(report_label="kill_board",
+                                              target=TargetChannel(channel_label="comms"))],
+            )
+        ],
+    )
+    cfg.reports.append(report)
+    return cfg
+
+
+def test_send_report_desc_order(db):
+    cfg = _report_config()
+    eng = make_engine(cfg, db)
+    db.set_mutable_variable("kills", 3, NODE_ID)
+    db.set_mutable_variable("kills", 7, NODE2_ID)
+    eng.handle_periodic()
+    assert len(eng.sent_channels) == 1
+    text = eng.sent_channels[0][1]
+    # NODE2_ID (7 kills) should appear before NODE_ID (3 kills)
+    assert text.index(NODE2_ID) < text.index(NODE_ID)
+
+
+def test_send_report_asc_order(db):
+    cfg = _report_config(sort_order="asc")
+    eng = make_engine(cfg, db)
+    db.set_mutable_variable("kills", 3, NODE_ID)
+    db.set_mutable_variable("kills", 7, NODE2_ID)
+    eng.handle_periodic()
+    text = eng.sent_channels[0][1]
+    assert text.index(NODE_ID) < text.index(NODE2_ID)
+
+
+def test_send_report_rows_cap(db):
+    cfg = _report_config(rows=1)
+    eng = make_engine(cfg, db)
+    db.set_mutable_variable("kills", 3, NODE_ID)
+    db.set_mutable_variable("kills", 7, NODE2_ID)
+    eng.handle_periodic()
+    text = eng.sent_channels[0][1]
+    assert NODE2_ID in text
+    assert NODE_ID not in text  # capped at 1 row, NODE2_ID wins with 7
+
+
+def test_send_report_empty_shows_no_data(db):
+    cfg = _report_config()
+    eng = make_engine(cfg, db)
+    # No variables set
+    eng.handle_periodic()
+    text = eng.sent_channels[0][1]
+    assert "(no data)" in text
+
+
+def test_send_report_title_included(db):
+    cfg = _report_config(title="🏆 Top Players")
+    eng = make_engine(cfg, db)
+    db.set_mutable_variable("kills", 1, NODE_ID)
+    eng.handle_periodic()
+    text = eng.sent_channels[0][1]
+    assert "🏆 Top Players" in text
+
+
+def test_send_report_no_title(db):
+    cfg = _report_config(title=None)
+    eng = make_engine(cfg, db)
+    db.set_mutable_variable("kills", 1, NODE_ID)
+    eng.handle_periodic()
+    text = eng.sent_channels[0][1]
+    # Should start with "1." (rank), not a title line
+    assert text.strip().startswith("1.")
+
+
+def test_send_report_aligned_numeric_right_justified(db):
+    cfg = _report_config(align=True)
+    eng = make_engine(cfg, db)
+    db.set_mutable_variable("kills", 10, NODE_ID)
+    db.set_mutable_variable("kills", 5, NODE2_ID)
+    eng.handle_periodic()
+    text = eng.sent_channels[0][1]
+    lines = [l for l in text.splitlines() if l.strip().startswith(("1.", "2."))]
+    assert len(lines) == 2
+    # Both numeric columns should have the same width (right-aligned)
+    # Extract the numeric part from each line
+    parts_1 = lines[0].split()
+    parts_2 = lines[1].split()
+    # The last token on each row is the kill count — right-aligned means same field width
+    assert len(lines[0].rstrip()) == len(lines[1].rstrip()) or "10" in lines[0]

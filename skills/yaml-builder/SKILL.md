@@ -702,6 +702,46 @@ events:
 `scout` flag, the waypoint also gets tagged `scout`, so later triggers can distinguish
 waypoints by who dropped them.
 
+**Leaderboards and reports:**
+Define a `reports:` entry and dispatch it with `send_report`. Rows are per-node,
+ranked by a mutable variable. Text columns left-align, numeric columns right-align.
+
+```yaml
+mutable_variables:
+  - label: score
+    type: integer
+    scope: node
+    initial: 0
+
+reports:
+  - label: scoreboard
+    title: "🏆 Leaderboard"
+    sort_by: score
+    sort_order: desc
+    rows: 5
+    columns:
+      - source: node_shortname
+        header: Player
+      - source: score
+        header: Score
+
+events:
+  - label: hourly_board
+    trigger:
+      type: time_window
+      start: "2020-01-01T00:00:00"
+      end:   "2099-01-01T00:00:00"
+    auto_recur: true
+    recur_mins: 60
+    responses:
+      - type: send_report
+        report_label: scoreboard
+        to_channel: game_channel
+```
+
+`send_report` also works as a DM response — e.g. `to_triggering_node: true` in a
+command event so a player can request the leaderboard on demand.
+
 **Triangular zones:**
 Zones must have exactly 3 points. Cover rectangular areas with two triangles:
 ```yaml
@@ -764,6 +804,7 @@ Before outputting any YAML, mentally verify:
 - [ ] `delete_mesh_waypoint`: exactly one of `label` or `use_triggering_waypoint` is set;
   `use_triggering_waypoint: true` only valid when the triggering dynamic waypoint was created
   with `mesh_*` fields
+- [ ] `send_report`: `report_label` references a defined `reports:` entry; `sort_by` variable is `scope: node`; all column `source` values are built-in tokens or `scope: node` mutable variable labels
 
 ## Reference examples
 
