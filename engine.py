@@ -27,6 +27,7 @@ from config import (
     CreateWaypointResponse, AddDynamicWaypointFlagResponse,
     RemoveDynamicWaypointFlagResponse, DestroyWaypointResponse,
     BroadcastWaypointResponse, DeleteMeshWaypointResponse, ForceRefreshWaypointResponse,
+    TrackReceivedWaypointResponse,
     TargetTriggeringNode, TargetNode, TargetZone, TargetFlag,
     TargetWaypointRadius, TargetAllInZone, TargetAllWithFlag,
     TargetAllNearWaypoint, TargetAllNearTriggeringWaypoint, TargetAllNearNode, TargetChannel, TargetGroup,
@@ -145,6 +146,7 @@ class WaypointReceivedContext:
     waypoint_lon: float
     waypoint_expire: int          # Unix timestamp; 0 if no expiry
     mesh_waypoint_id: int | None
+    triggering_waypoint_id: int | None = None  # set by track_received_waypoint
 
 
 Context = NodeContext | MessageContext | PeriodicContext | ExpiryContext | WaypointReceivedContext
@@ -1287,6 +1289,40 @@ class Engine:
                 log.info("force_refresh_waypoint broadcast %r ch%d (id=%d)", n, ci, wid_)
             self._enqueue("force_refresh_waypoint", _fn)
             self.state.mark_waypoints_refreshed([wid])
+
+        elif isinstance(resp, TrackReceivedWaypointResponse):
+            if not isinstance(ctx, WaypointReceivedContext):
+                log.warning("track_received_waypoint: no WaypointReceivedContext; skipping")
+                return
+            if resp.expiry_mins is not None:
+                expiry_mins = resp.expiry_mins
+            elif ctx.waypoint_expire:
+                secs_remaining = ctx.waypoint_expire - int(time.time())
+                expiry_mins = max(secs_remaining / 60, 0) if secs_remaining > 0 else None
+            else:
+                expiry_mins = None
+            new_wp_id = self.state.create_dynamic_waypoint(
+                ctx.waypoint_lat, ctx.waypoint_lon, expiry_mins
+            )
+            if ctx.mesh_waypoint_id is not None:
+                self.state.set_mesh_waypoint_id_for_dynamic(new_wp_id, ctx.mesh_waypoint_id)
+            _flag_map = {f.label: f for f in self.config.flags}
+            for flag_label in resp.initial_flags:
+                flag_def = _flag_map.get(flag_label)
+                self.state.add_dynamic_waypoint_flag(
+                    new_wp_id, flag_label,
+                    flag_def.expiry_mins if flag_def else None,
+                )
+            if resp.placer_flag and ctx.node_id:
+                if self.state.has_flag("node", ctx.node_id, resp.placer_flag):
+                    flag_def = _flag_map.get(resp.placer_flag)
+                    self.state.add_dynamic_waypoint_flag(
+                        new_wp_id, resp.placer_flag,
+                        flag_def.expiry_mins if flag_def else None,
+                    )
+            ctx.triggering_waypoint_id = new_wp_id
+            log.info("track_received_waypoint: created dynamic wp %d at %.5f,%.5f",
+                     new_wp_id, ctx.waypoint_lat, ctx.waypoint_lon)
 
     # ------------------------------------------------------------------
     # Target resolution

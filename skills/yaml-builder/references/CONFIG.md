@@ -1610,6 +1610,34 @@ Also removes the `mesh_waypoints` tracking record.
 
 ---
 
+#### `track_received_waypoint` — register an incoming node waypoint as a game object
+
+Only valid in `waypoint_received` events. Converts the received waypoint into a tracked
+`dynamic_waypoint` so all existing waypoint machinery (`near_waypoint`, `flag_expired`,
+`destroy_waypoint`, `delete_mesh_waypoint use_triggering_waypoint: true`) can act on it.
+After this response executes, subsequent responses in the same event have access to the
+waypoint as the triggering waypoint.
+
+```yaml
+- type: track_received_waypoint
+  initial_flags:
+    - supply_drop         # flags applied to the waypoint unconditionally
+  placer_flag: scout      # copy this flag from the placing node to the waypoint if the node has it
+  expiry_mins: 60         # optional; defaults to the packet's expire timestamp (no expiry if 0)
+```
+
+| Field | Required | Description |
+|---|---|---|
+| `initial_flags` | no | List of flag labels to add to the tracked waypoint on creation. |
+| `placer_flag` | no | If the placing node has this flag, also add it to the waypoint — lets the waypoint inherit the placer's role. |
+| `expiry_mins` | no | Override the waypoint's lifetime. If omitted, the packet's own expire timestamp is used (converted to minutes remaining). If the packet has no expiry (expire = 0), the waypoint never expires. |
+
+**Context note:** `delete_mesh_waypoint use_triggering_waypoint: true` works after
+`track_received_waypoint` because the response links the original `mesh_waypoint_id`
+from the packet to the newly created `dynamic_waypoint`.
+
+---
+
 ### Targets
 
 Every response (except `set_event_triggers`, `disable_event`, `enable_event`,

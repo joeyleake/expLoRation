@@ -399,6 +399,13 @@ class ForceRefreshWaypointResponse:
     max_meters: float | None = None
 
 
+@dataclass
+class TrackReceivedWaypointResponse:
+    initial_flags: list[str] = field(default_factory=list)
+    placer_flag: str | None = None
+    expiry_mins: float | None = None  # None = derive from packet expire; 0 packet = no expiry
+
+
 Response = (
     SendMessageResponse
     | SendAlertResponse
@@ -423,6 +430,7 @@ Response = (
     | BroadcastWaypointResponse
     | DeleteMeshWaypointResponse
     | ForceRefreshWaypointResponse
+    | TrackReceivedWaypointResponse
 )
 
 
@@ -615,6 +623,12 @@ def _parse_response(raw: dict) -> Response:
         return ForceRefreshWaypointResponse(
             flag_label=raw.get("flag_label"),
             max_meters=float(raw["max_meters"]) if "max_meters" in raw else None,
+        )
+    if kind == "track_received_waypoint":
+        return TrackReceivedWaypointResponse(
+            initial_flags=raw.get("initial_flags", []),
+            placer_flag=raw.get("placer_flag"),
+            expiry_mins=float(raw["expiry_mins"]) if "expiry_mins" in raw else None,
         )
     raise ConfigError(f"Unknown response type: {kind!r}")
 
@@ -1031,6 +1045,15 @@ def _validate(cfg: GameConfig) -> None:
                     raise ConfigError(
                         f"{ctx}: destroy_waypoint is only valid in near_waypoint + target_flag events"
                     )
+            if isinstance(resp, TrackReceivedWaypointResponse):
+                if not isinstance(t, WaypointReceivedTrigger):
+                    raise ConfigError(
+                        f"{ctx}: track_received_waypoint is only valid in waypoint_received events"
+                    )
+                for flag_label in resp.initial_flags:
+                    _check_label(flag_label, flag_labels, f"{ctx} track_received_waypoint initial_flags")
+                if resp.placer_flag:
+                    _check_label(resp.placer_flag, flag_labels, f"{ctx} track_received_waypoint placer_flag")
             if isinstance(resp, (AddDynamicWaypointFlagResponse, RemoveDynamicWaypointFlagResponse)):
                 if not _can_add_remove_waypoint_flag:
                     raise ConfigError(

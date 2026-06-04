@@ -658,6 +658,50 @@ events:
 Available interpolation tokens: `{waypoint_name}`, `{waypoint_description}`,
 `{waypoint_lat}`, `{waypoint_lon}`, `{node_id}` (sender's hex ID).
 
+**`track_received_waypoint`** — converts the received waypoint into a tracked
+`dynamic_waypoint` so all existing machinery (`near_waypoint`, `flag_expired`,
+`destroy_waypoint`, `delete_mesh_waypoint`) works on it. Must appear in a
+`waypoint_received` event. After it executes, subsequent responses in the same
+event can reference the waypoint as the triggering waypoint.
+
+```yaml
+flags:
+  - label: supply_drop
+  - label: scout
+
+events:
+  - label: track_supply
+    trigger:
+      type: waypoint_received
+      from_flag: scout
+    responses:
+      - type: track_received_waypoint
+        initial_flags:
+          - supply_drop       # always applied to the waypoint
+        placer_flag: scout    # also flag the waypoint with 'scout' if the placing node has it
+        expiry_mins: 60       # optional override; defaults to the packet's own expire time
+      - type: send_message
+        message_label: supply_ack
+        to_triggering_node: true
+
+  - label: collect_supply
+    trigger:
+      type: near_waypoint
+      target_flag: supply_drop
+      meters: 10
+    responses:
+      - type: send_message
+        message_label: collected
+        to_channel: ops_channel
+      - type: delete_mesh_waypoint
+        use_triggering_waypoint: true
+      - type: destroy_waypoint
+```
+
+`placer_flag` lets a waypoint inherit the placer's role — if the placing node has the
+`scout` flag, the waypoint also gets tagged `scout`, so later triggers can distinguish
+waypoints by who dropped them.
+
 **Triangular zones:**
 Zones must have exactly 3 points. Cover rectangular areas with two triangles:
 ```yaml
@@ -697,6 +741,7 @@ Before outputting any YAML, mentally verify:
   (`enters_zone`, `leaves_zone`, `near_waypoint`, `near_node`, `dm`, `channel`, `flag_expired` with `target_kind: node`)
 - [ ] `add_waypoint_flag`, `remove_waypoint_flag`, `destroy_waypoint` only appear
   in `near_waypoint` + `target_flag` or `flag_expired` + `dynamic_waypoint` events
+- [ ] `track_received_waypoint` only appears in `waypoint_received` events
 - [ ] `to_triggering_node` is not used in `time_window`, `in_zone_on_start`,
   `waypoint_expired`, or `flag_expired` with non-node `target_kind`
 - [ ] `to_all_near_triggering_waypoint` only used in dynamic waypoint context

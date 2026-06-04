@@ -3002,3 +3002,173 @@ def test_random_point_within_radius_not_always_center():
     points = [geo.random_point_within_radius(*origin, 100) for _ in range(20)]
     # At least some points should differ from each other
     assert len(set(points)) > 1
+
+
+# ---------------------------------------------------------------------------
+# track_received_waypoint
+# ---------------------------------------------------------------------------
+
+def _make_track_wp_ctx(name="supply", expire=0, mesh_id=99001):
+    from engine import WaypointReceivedContext
+    return WaypointReceivedContext(
+        node_id=NODE_ID,
+        waypoint_name=name,
+        waypoint_description="desc",
+        waypoint_lat=47.003,
+        waypoint_lon=-122.003,
+        waypoint_expire=expire,
+        mesh_waypoint_id=mesh_id,
+    )
+
+
+def test_track_received_waypoint_creates_dynamic_waypoint(db):
+    from config import WaypointReceivedTrigger, TrackReceivedWaypointResponse
+    cfg = minimal_config(
+        flags=[FlagDef(label="supply_drop")],
+        events=[
+            Event(
+                label="on_wp",
+                trigger=WaypointReceivedTrigger(),
+                responses=[TrackReceivedWaypointResponse(initial_flags=["supply_drop"])],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db)
+    eng.handle_waypoint_received(_make_track_wp_ctx())
+    wps = _get_all_dynamic_waypoints(db)
+    assert len(wps) == 1
+    assert abs(wps[0]["lat"] - 47.003) < 1e-6
+    assert abs(wps[0]["lon"] - (-122.003)) < 1e-6
+
+
+def test_track_received_waypoint_sets_initial_flags(db):
+    from config import WaypointReceivedTrigger, TrackReceivedWaypointResponse
+    cfg = minimal_config(
+        flags=[FlagDef(label="supply_drop"), FlagDef(label="urgent")],
+        events=[
+            Event(
+                label="on_wp",
+                trigger=WaypointReceivedTrigger(),
+                responses=[TrackReceivedWaypointResponse(initial_flags=["supply_drop", "urgent"])],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db)
+    eng.handle_waypoint_received(_make_track_wp_ctx())
+    wps = _get_all_dynamic_waypoints(db)
+    assert len(wps) == 1
+    wp_id = wps[0]["id"]
+    assert db.has_dynamic_waypoint_flag(wp_id, "supply_drop")
+    assert db.has_dynamic_waypoint_flag(wp_id, "urgent")
+
+
+def test_track_received_waypoint_placer_flag_copied_when_node_has_it(db):
+    from config import WaypointReceivedTrigger, TrackReceivedWaypointResponse
+    cfg = minimal_config(
+        flags=[FlagDef(label="scout")],
+        events=[
+            Event(
+                label="on_wp",
+                trigger=WaypointReceivedTrigger(),
+                responses=[TrackReceivedWaypointResponse(placer_flag="scout")],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db)
+    db.add_flag("node", NODE_ID, "scout")
+    eng.handle_waypoint_received(_make_track_wp_ctx())
+    wps = _get_all_dynamic_waypoints(db)
+    assert len(wps) == 1
+    assert db.has_dynamic_waypoint_flag(wps[0]["id"], "scout")
+
+
+def test_track_received_waypoint_placer_flag_not_copied_without_flag(db):
+    from config import WaypointReceivedTrigger, TrackReceivedWaypointResponse
+    cfg = minimal_config(
+        flags=[FlagDef(label="scout")],
+        events=[
+            Event(
+                label="on_wp",
+                trigger=WaypointReceivedTrigger(),
+                responses=[TrackReceivedWaypointResponse(placer_flag="scout")],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db)
+    # Node does NOT have scout flag
+    eng.handle_waypoint_received(_make_track_wp_ctx())
+    wps = _get_all_dynamic_waypoints(db)
+    assert len(wps) == 1
+    assert not db.has_dynamic_waypoint_flag(wps[0]["id"], "scout")
+
+
+def test_track_received_waypoint_sets_triggering_waypoint_id(db):
+    """After track_received_waypoint, ctx.triggering_waypoint_id matches the created waypoint."""
+    from config import WaypointReceivedTrigger, TrackReceivedWaypointResponse
+    from engine import WaypointReceivedContext
+    cfg = minimal_config(
+        flags=[FlagDef(label="supply_drop")],
+        events=[
+            Event(
+                label="on_wp",
+                trigger=WaypointReceivedTrigger(),
+                responses=[TrackReceivedWaypointResponse(initial_flags=["supply_drop"])],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db)
+    ctx = _make_track_wp_ctx()
+    eng.handle_waypoint_received(ctx)
+    wps = _get_all_dynamic_waypoints(db)
+    assert len(wps) == 1
+    assert ctx.triggering_waypoint_id == wps[0]["id"]
+
+
+def test_track_received_waypoint_links_mesh_waypoint_id(db):
+    from config import WaypointReceivedTrigger, TrackReceivedWaypointResponse
+    cfg = minimal_config(
+        flags=[FlagDef(label="supply_drop")],
+        events=[
+            Event(
+                label="on_wp",
+                trigger=WaypointReceivedTrigger(),
+                responses=[TrackReceivedWaypointResponse(initial_flags=["supply_drop"])],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db)
+    eng.handle_waypoint_received(_make_track_wp_ctx(mesh_id=99001))
+    wps = _get_all_dynamic_waypoints(db)
+    assert len(wps) == 1
+    linked = db.get_mesh_waypoint_id_for_dynamic(wps[0]["id"])
+    assert linked == 99001
+
+
+def test_track_received_waypoint_near_waypoint_trigger_fires(db):
+    """After tracking, near_waypoint with target_flag fires when node walks nearby."""
+    from config import WaypointReceivedTrigger, TrackReceivedWaypointResponse
+    cfg = minimal_config(
+        flags=[FlagDef(label="supply_drop")],
+        messages=[Message(label="found", text="found one")],
+        events=[
+            Event(
+                label="on_wp",
+                trigger=WaypointReceivedTrigger(),
+                responses=[TrackReceivedWaypointResponse(initial_flags=["supply_drop"])],
+            ),
+            Event(
+                label="collect",
+                trigger=ProximityTrigger(kind="near_waypoint", target_flag="supply_drop", meters=20),
+                responses=[SendMessageResponse(message_label="found", target=TargetChannel(channel_label="comms"))],
+            ),
+        ],
+    )
+    eng = make_engine(cfg, db)
+    # Receive and track the waypoint at INSIDE_ZONE
+    ctx = _make_track_wp_ctx()
+    ctx.waypoint_lat, ctx.waypoint_lon = INSIDE_ZONE
+    eng.handle_waypoint_received(ctx)
+    # Node walks to the same spot
+    db.update_node_location(NODE_ID, *INSIDE_ZONE)
+    eng.handle_position(NODE_ID, *INSIDE_ZONE)
+    assert len(eng.sent_channels) == 1
