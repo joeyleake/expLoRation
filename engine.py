@@ -207,8 +207,10 @@ class Engine:
             if ctx.left_zones:
                 d["left_zones"] = sorted(ctx.left_zones)
         elif isinstance(ctx, MessageContext):
-            if ctx.channel_label:
-                d["channel"] = ctx.channel_label
+            if not ctx.is_dm:
+                label = next((k for k, v in self.channel_index_map.items() if v == ctx.channel_idx), None)
+                if label:
+                    d["channel"] = label
         elif isinstance(ctx, ExpiryContext):
             d["target_kind"] = ctx.target_kind
             if ctx.flag_label:
@@ -1060,6 +1062,16 @@ class Engine:
                                 resp.randomly_in_zone_group)
                     return
                 lat, lon = geo.random_point_in_triangle(*random.choice(member_zones).points)
+            elif resp.randomly_near_location_meters is not None:
+                ref_loc = None
+                if wp_id is not None:
+                    ref_loc = self.state.get_dynamic_waypoint_location(wp_id)
+                if ref_loc is None and node_id is not None:
+                    ref_loc = self.state.get_node_location(node_id)
+                if ref_loc is None:
+                    log.warning("create_waypoint: no location in context for randomly_near_location; skipping")
+                    return
+                lat, lon = geo.random_point_within_radius(*ref_loc, resp.randomly_near_location_meters)
             else:
                 loc = self.state.get_node_location(node_id) if node_id else None
                 if loc is None:

@@ -346,8 +346,9 @@ class RepeatResponse:
 class CreateWaypointResponse:
     expiry_mins: float | None = None
     initial_flags: list[str] = field(default_factory=list)
-    randomly_in_zone: str | None = None            # place at a random point inside this zone
-    randomly_in_zone_group: str | None = None      # pick a random zone from the group, then a random point
+    randomly_in_zone: str | None = None              # place at a random point inside this zone
+    randomly_in_zone_group: str | None = None        # pick a random zone from the group, then a random point
+    randomly_near_location_meters: float | None = None  # spawn within N meters of triggering waypoint or node
     # Optional: also push to the Meshtastic mesh map
     mesh_name: str | None = None
     mesh_description: str = ""
@@ -576,6 +577,7 @@ def _parse_response(raw: dict) -> Response:
             initial_flags=raw.get("initial_flags", []),
             randomly_in_zone=raw.get("randomly_in_zone"),
             randomly_in_zone_group=raw.get("randomly_in_zone_group"),
+            randomly_near_location_meters=float(raw["randomly_near_location"]) if "randomly_near_location" in raw else None,
             mesh_name=raw.get("mesh_name"),
             mesh_description=raw.get("mesh_description", ""),
             mesh_icon=int(raw.get("mesh_icon", 0)),
@@ -977,14 +979,24 @@ def _validate(cfg: GameConfig) -> None:
                         f"{ctx}: to_triggering_node is not valid for this trigger type (no node context)"
                     )
             if isinstance(resp, CreateWaypointResponse):
-                if resp.randomly_in_zone is not None and resp.randomly_in_zone_group is not None:
-                    raise ConfigError(f"{ctx}: create_waypoint randomly_in_zone and randomly_in_zone_group are mutually exclusive")
+                _placement_opts = [
+                    resp.randomly_in_zone,
+                    resp.randomly_in_zone_group,
+                    resp.randomly_near_location_meters,
+                ]
+                if sum(x is not None for x in _placement_opts) > 1:
+                    raise ConfigError(
+                        f"{ctx}: create_waypoint randomly_in_zone, randomly_in_zone_group, "
+                        f"and randomly_near_location are mutually exclusive"
+                    )
                 if resp.randomly_in_zone is not None:
                     _check_label(resp.randomly_in_zone, zone_labels, f"{ctx} create_waypoint randomly_in_zone")
                 elif resp.randomly_in_zone_group is not None:
                     _check_label(resp.randomly_in_zone_group, group_labels, f"{ctx} create_waypoint randomly_in_zone_group")
                     if group_kind.get(resp.randomly_in_zone_group) != "zone":
                         raise ConfigError(f"{ctx}: create_waypoint randomly_in_zone_group: group {resp.randomly_in_zone_group!r} must be kind 'zone'")
+                elif resp.randomly_near_location_meters is not None:
+                    pass  # valid in any context; runtime warns if no location available
                 elif not _has_node_context:
                     raise ConfigError(f"{ctx}: create_waypoint without randomly_in_zone requires a trigger that provides node context")
                 if resp.mesh_name is not None:

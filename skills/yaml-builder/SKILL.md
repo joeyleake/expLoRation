@@ -311,7 +311,50 @@ events:
         - laser_target
 ```
 `create_waypoint` requires node context — it CANNOT appear directly in a
-`time_window` or `in_zone_on_start` event. Always wrap it in `with_node`.
+`time_window` or `in_zone_on_start` event unless `randomly_in_zone` or
+`randomly_in_zone_group` is set. Always wrap it in `with_node` otherwise.
+
+**Placement options** (mutually exclusive):
+
+| Field | Behaviour |
+|---|---|
+| *(none)* | At the triggering node's current location |
+| `randomly_in_zone: <label>` | Random point inside the named zone triangle |
+| `randomly_in_zone_group: <label>` | Random zone from group, then random point in it |
+| `randomly_near_location: <meters>` | Within N meters of triggering waypoint (if any), else triggering node |
+
+`randomly_near_location` is ideal for spawning near a game object that just triggered an event
+— e.g. spawn a replacement zombie within 30m of the one just killed:
+
+```yaml
+- label: zombie_reinforcement
+  trigger:
+    type: near_waypoint
+    target_flag: zombie
+    meters: 10
+  responses:
+    - type: destroy_waypoint
+    - type: create_waypoint
+      randomly_near_location: 30
+      initial_flags:
+        - zombie
+      mesh_name: "🧟 zombie #{waypoint_id}"
+      mesh_icon: 129503
+      mesh_channel: comms
+```
+
+Combine with `with_node` to spawn near a specific player instead:
+
+```yaml
+- type: with_node
+  to_all_with_flag: player
+  random_n: 1
+  responses:
+    - type: create_waypoint
+      randomly_near_location: 50
+      initial_flags:
+        - objective
+```
 
 *Blast radius / area effect:*
 ```yaml
@@ -645,6 +688,7 @@ Before outputting any YAML, mentally verify:
 
 - [ ] Every label referenced in a trigger, response, or exception is defined in its section
 - [ ] Every `near_waypoint`, `near_zone`, `near_node` trigger has `meters`
+- [ ] `create_waypoint randomly_near_location` only appears in node-context or waypoint-context events (not bare `time_window`)
 - [ ] Every `*_zone_group` / `in_zone_group` / `in_zone_group_on_start` trigger has `target`, and the referenced group has `kind: zone`
 - [ ] Every `channel` trigger has `channel_label`
 - [ ] Every `zone_has_flag`/`waypoint_has_flag` exception has `target` (or is in a dynamic waypoint context)

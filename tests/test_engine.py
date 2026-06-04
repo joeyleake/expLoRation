@@ -2904,3 +2904,101 @@ def test_create_waypoint_randomly_in_zone_no_node_required(db):
     eng.handle_periodic()
     wps = _get_all_dynamic_waypoints(db)
     assert len(wps) == 1
+
+
+# ---------------------------------------------------------------------------
+# randomly_near_location
+# ---------------------------------------------------------------------------
+
+def test_create_waypoint_randomly_near_location_uses_node(db):
+    """randomly_near_location spawns within radius of triggering node."""
+    import geometry as geo
+    cfg = minimal_config(
+        events=[
+            Event(
+                label="spawn",
+                trigger=ProximityTrigger(kind="enters_zone", target_label="zone_a"),
+                responses=[CreateWaypointResponse(randomly_near_location_meters=50)],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db)
+    db.update_node_location(NODE_ID, *INSIDE_ZONE)
+    eng.handle_position(NODE_ID, *INSIDE_ZONE)
+    wps = _get_all_dynamic_waypoints(db)
+    assert len(wps) == 1
+    _, lat, lon = wps[0]
+    dist = geo.haversine(*INSIDE_ZONE, lat, lon)
+    assert dist <= 50, f"Waypoint spawned {dist:.1f}m away, expected <= 50m"
+
+
+def test_create_waypoint_randomly_near_location_uses_triggering_waypoint(db):
+    """randomly_near_location uses triggering waypoint as origin, not the node."""
+    import geometry as geo
+    # Node at INSIDE_ZONE; waypoint ~44m east — within near_waypoint radius of 50m
+    node_lat, node_lon = INSIDE_ZONE
+    wp_lat, wp_lon = node_lat, node_lon + 0.0005  # ~44m east
+
+    cfg = minimal_config(
+        flags=[FlagDef(label="target")],
+        events=[
+            Event(
+                label="spawn_near_wp",
+                trigger=ProximityTrigger(kind="near_waypoint", target_flag="target", meters=50),
+                responses=[CreateWaypointResponse(randomly_near_location_meters=5)],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db)
+    db.update_node_location(NODE_ID, node_lat, node_lon)
+    wp_id = db.create_dynamic_waypoint(wp_lat, wp_lon, expiry_mins=None)
+    db.add_dynamic_waypoint_flag(wp_id, "target", expiry_mins=None)
+    eng.handle_position(NODE_ID, node_lat, node_lon)
+    wps = _get_all_dynamic_waypoints(db)
+    assert len(wps) == 2
+    new_wp = next(r for r in wps if r["id"] != wp_id)
+    dist_from_wp = geo.haversine(wp_lat, wp_lon, new_wp["lat"], new_wp["lon"])
+    assert dist_from_wp <= 5, f"New waypoint {dist_from_wp:.1f}m from trigger wp, expected <= 5m"
+
+
+def test_create_waypoint_randomly_near_location_no_location_skips(db):
+    """randomly_near_location skips silently when no location is in context."""
+    from config import TimedTrigger
+    from datetime import datetime, timezone
+    now_utc = datetime.now(timezone.utc)
+    cfg = minimal_config(
+        events=[
+            Event(
+                label="spawn",
+                trigger=TimedTrigger(
+                    start=now_utc.replace(year=2020),
+                    end=now_utc.replace(year=2099),
+                ),
+                responses=[CreateWaypointResponse(randomly_near_location_meters=50)],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db)
+    # Periodic context has no node/waypoint — should skip without error
+    eng.handle_periodic()
+    assert _get_all_dynamic_waypoints(db) == []
+
+
+def test_random_point_within_radius_distance():
+    """random_point_within_radius always returns a point within the specified radius."""
+    import geometry as geo
+    origin = (37.7749, -122.4194)
+    radius = 100.0
+    for _ in range(50):
+        lat, lon = geo.random_point_within_radius(*origin, radius)
+        dist = geo.haversine(*origin, lat, lon)
+        assert dist <= radius + 0.01, f"Point {dist:.2f}m from origin, expected <= {radius}m"
+
+
+def test_random_point_within_radius_not_always_center():
+    """random_point_within_radius produces spread — not all points at origin."""
+    import geometry as geo
+    origin = (37.7749, -122.4194)
+    points = [geo.random_point_within_radius(*origin, 100) for _ in range(20)]
+    # At least some points should differ from each other
+    assert len(set(points)) > 1
