@@ -1,5 +1,6 @@
 """Geographic utility functions: haversine distance and point-in-triangle."""
 import math
+import random
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -54,13 +55,30 @@ def zone_centroid(zone: "Zone") -> tuple[float, float]:
     return sum(lats) / 3, sum(lons) / 3
 
 
+def random_point_within_radius(lat: float, lon: float, radius_m: float) -> tuple[float, float]:
+    """Return a uniformly random (lat, lon) point within radius_m meters of (lat, lon)."""
+    distance = radius_m * math.sqrt(random.random())  # sqrt for uniform area distribution
+    bearing_rad = random.uniform(0, 2 * math.pi)
+    R = 6_371_000
+    lat_r = math.radians(lat)
+    lon_r = math.radians(lon)
+    new_lat_r = math.asin(
+        math.sin(lat_r) * math.cos(distance / R)
+        + math.cos(lat_r) * math.sin(distance / R) * math.cos(bearing_rad)
+    )
+    new_lon_r = lon_r + math.atan2(
+        math.sin(bearing_rad) * math.sin(distance / R) * math.cos(lat_r),
+        math.cos(distance / R) - math.sin(lat_r) * math.sin(new_lat_r),
+    )
+    return math.degrees(new_lat_r), math.degrees(new_lon_r)
+
+
 def random_point_in_triangle(
     a: tuple[float, float],
     b: tuple[float, float],
     c: tuple[float, float],
 ) -> tuple[float, float]:
     """Return a uniformly random (lat, lon) point inside triangle (a, b, c)."""
-    import random
     r1, r2 = random.random(), random.random()
     if r1 + r2 > 1:
         r1, r2 = 1 - r1, 1 - r2

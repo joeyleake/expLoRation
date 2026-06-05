@@ -27,6 +27,7 @@ from config import (
     CreateWaypointResponse, AddDynamicWaypointFlagResponse,
     RemoveDynamicWaypointFlagResponse, DestroyWaypointResponse,
     BroadcastWaypointResponse, DeleteMeshWaypointResponse, ForceRefreshWaypointResponse,
+    TrackReceivedWaypointResponse, SendReportResponse, ReportDef,
     TargetTriggeringNode, TargetNode, TargetZone, TargetFlag,
     TargetWaypointRadius, TargetAllInZone, TargetAllWithFlag,
     TargetAllNearWaypoint, TargetAllNearTriggeringWaypoint, TargetAllNearNode, TargetChannel, TargetGroup,
@@ -145,6 +146,7 @@ class WaypointReceivedContext:
     waypoint_lon: float
     waypoint_expire: int          # Unix timestamp; 0 if no expiry
     mesh_waypoint_id: int | None
+    triggering_waypoint_id: int | None = None  # set by track_received_waypoint
 
 
 Context = NodeContext | MessageContext | PeriodicContext | ExpiryContext | WaypointReceivedContext
@@ -207,8 +209,10 @@ class Engine:
             if ctx.left_zones:
                 d["left_zones"] = sorted(ctx.left_zones)
         elif isinstance(ctx, MessageContext):
-            if ctx.channel_label:
-                d["channel"] = ctx.channel_label
+            if not ctx.is_dm:
+                label = next((k for k, v in self.channel_index_map.items() if v == ctx.channel_idx), None)
+                if label:
+                    d["channel"] = label
         elif isinstance(ctx, ExpiryContext):
             d["target_kind"] = ctx.target_kind
             if ctx.flag_label:
@@ -1060,6 +1064,16 @@ class Engine:
                                 resp.randomly_in_zone_group)
                     return
                 lat, lon = geo.random_point_in_triangle(*random.choice(member_zones).points)
+            elif resp.randomly_near_location_meters is not None:
+                ref_loc = None
+                if wp_id is not None:
+                    ref_loc = self.state.get_dynamic_waypoint_location(wp_id)
+                if ref_loc is None and node_id is not None:
+                    ref_loc = self.state.get_node_location(node_id)
+                if ref_loc is None:
+                    log.warning("create_waypoint: no location in context for randomly_near_location; skipping")
+                    return
+                lat, lon = geo.random_point_within_radius(*ref_loc, resp.randomly_near_location_meters)
             else:
                 loc = self.state.get_node_location(node_id) if node_id else None
                 if loc is None:
@@ -1254,27 +1268,92 @@ class Engine:
                     if datetime.now(timezone.utc) - last_dt < timedelta(minutes=cooldown_mins):
                         log.debug("force_refresh_waypoint: cooldown active for wp %d", wid)
                         return
-            ch_idx = self._resolve_channel_index(nearest["channel"]) if nearest["channel"] else None
-            if ch_idx is None:
-                log.warning("force_refresh_waypoint: channel %r not mapped for wp %d",
-                            nearest["channel"], wid)
-                return
-            from meshtastic import BROADCAST_ADDR as _BCAST
             expire_ts = (int(datetime.fromisoformat(nearest["expires_at"]).timestamp())
                          if nearest["expires_at"] else 0)
-            def _fn(n=nearest["name"], d=nearest["description"], ic=nearest["icon"],
-                    ex=expire_ts, wid_=wid, la=nearest["lat"], lo=nearest["lon"],
-                    ci=ch_idx, ba=_BCAST):
-                if self.interface is None:
+            ch_idx = self._resolve_channel_index(nearest["channel"]) if nearest["channel"] else None
+            if ch_idx is not None:
+                from meshtastic import BROADCAST_ADDR as _BCAST
+                def _fn(n=nearest["name"], d=nearest["description"], ic=nearest["icon"],
+                        ex=expire_ts, wid_=wid, la=nearest["lat"], lo=nearest["lon"],
+                        ci=ch_idx, ba=_BCAST):
+                    if self.interface is None:
+                        return
+                    self.interface.sendWaypoint(
+                        name=n, description=d, icon=ic, expire=ex,
+                        waypoint_id=wid_, latitude=la, longitude=lo,
+                        destinationId=ba, channelIndex=ci,
+                    )
+                    log.info("force_refresh_waypoint broadcast %r ch%d (id=%d)", n, ci, wid_)
+            elif node_id:
+                # Waypoint was originally sent via DM — re-DM to the triggering node
+                try:
+                    dest = int(node_id.lstrip("!"), 16)
+                except ValueError:
+                    log.warning("force_refresh_waypoint: invalid node_id %r", node_id)
                     return
-                self.interface.sendWaypoint(
-                    name=n, description=d, icon=ic, expire=ex,
-                    waypoint_id=wid_, latitude=la, longitude=lo,
-                    destinationId=ba, channelIndex=ci,
-                )
-                log.info("force_refresh_waypoint broadcast %r ch%d (id=%d)", n, ci, wid_)
+                def _fn(n=nearest["name"], d=nearest["description"], ic=nearest["icon"],
+                        ex=expire_ts, wid_=wid, la=nearest["lat"], lo=nearest["lon"],
+                        de=dest):
+                    if self.interface is None:
+                        return
+                    self.interface.sendWaypoint(
+                        name=n, description=d, icon=ic, expire=ex,
+                        waypoint_id=wid_, latitude=la, longitude=lo,
+                        destinationId=de, channelIndex=0,
+                    )
+                    log.info("force_refresh_waypoint DM %r → !%08x (id=%d)", n, de, wid_)
+            else:
+                log.warning("force_refresh_waypoint: no channel and no node_id for wp %d", wid)
+                return
             self._enqueue("force_refresh_waypoint", _fn)
             self.state.mark_waypoints_refreshed([wid])
+
+        elif isinstance(resp, TrackReceivedWaypointResponse):
+            if not isinstance(ctx, WaypointReceivedContext):
+                log.warning("track_received_waypoint: no WaypointReceivedContext; skipping")
+                return
+            if resp.expiry_mins is not None:
+                expiry_mins = resp.expiry_mins
+            elif ctx.waypoint_expire:
+                secs_remaining = ctx.waypoint_expire - int(time.time())
+                expiry_mins = max(secs_remaining / 60, 0) if secs_remaining > 0 else None
+            else:
+                expiry_mins = None
+            new_wp_id = self.state.create_dynamic_waypoint(
+                ctx.waypoint_lat, ctx.waypoint_lon, expiry_mins
+            )
+            if ctx.mesh_waypoint_id is not None:
+                self.state.set_mesh_waypoint_id_for_dynamic(new_wp_id, ctx.mesh_waypoint_id)
+            _flag_map = {f.label: f for f in self.config.flags}
+            for flag_label in resp.initial_flags:
+                flag_def = _flag_map.get(flag_label)
+                self.state.add_dynamic_waypoint_flag(
+                    new_wp_id, flag_label,
+                    flag_def.expiry_mins if flag_def else None,
+                )
+            if resp.placer_flag and ctx.node_id:
+                if self.state.has_flag("node", ctx.node_id, resp.placer_flag):
+                    flag_def = _flag_map.get(resp.placer_flag)
+                    self.state.add_dynamic_waypoint_flag(
+                        new_wp_id, resp.placer_flag,
+                        flag_def.expiry_mins if flag_def else None,
+                    )
+            ctx.triggering_waypoint_id = new_wp_id
+            log.info("track_received_waypoint: created dynamic wp %d at %.5f,%.5f",
+                     new_wp_id, ctx.waypoint_lat, ctx.waypoint_lon)
+
+        elif isinstance(resp, SendReportResponse):
+            report = next((r for r in self.config.reports if r.label == resp.report_label), None)
+            if report is None:
+                log.warning("send_report: report %r not found", resp.report_label)
+                return
+            text = self._render_report(report)
+            if isinstance(resp.target, TargetChannel):
+                self._send_channel(resp.target.channel_label, text)
+            else:
+                nodes = self._resolve_node_targets(resp.target, node_id, wp_id)
+                for nid in nodes:
+                    self._send_dm(nid, text)
 
     # ------------------------------------------------------------------
     # Target resolution
@@ -1487,6 +1566,82 @@ class Engine:
                 )
                 log.info("Alert channel[%d] broadcast: %r", i, c[:60])
             self._enqueue("send_alert", _fn)
+
+    def _resolve_report_column(self, source: str, node_id: str) -> str:
+        if source == "node_id":
+            return node_id
+        if source == "node_shortname":
+            info = (self.interface.nodes or {}).get(node_id, {}) if self.interface else {}
+            return info.get("user", {}).get("shortName", "").strip() or node_id
+        if source == "node_longname":
+            info = (self.interface.nodes or {}).get(node_id, {}) if self.interface else {}
+            return info.get("user", {}).get("longName", "").strip() or node_id
+        mv_def = self._mutable_var_defs.get(source)
+        if mv_def is not None:
+            val = self.state.get_mutable_variable(source, node_id)
+            if val is None:
+                val = mv_def.initial
+            return str(val) if val is not None else "—"
+        return "—"
+
+    def _render_report(self, report: ReportDef) -> str:
+        node_values = self.state.get_all_node_variable_values(report.sort_by)
+        # build set of node_ids already in DB
+        db_nodes = {nid for nid, _ in node_values}
+        # include nodes that have the sort variable in DB; exclude global (empty node_id)
+        reverse = (report.sort_order == "desc")
+        def _sort_key(item):
+            v = item[1]
+            # None sorts last regardless of direction
+            if v is None:
+                return (1, 0)
+            return (0, v) if not reverse else (0, -v if isinstance(v, (int, float)) else v)
+        sorted_rows = sorted(node_values, key=_sort_key)
+        if reverse:
+            sorted_rows = sorted(node_values,
+                key=lambda x: (x[1] is None, -(x[1]) if isinstance(x[1], (int, float)) else x[1] if x[1] is not None else ""))
+        else:
+            sorted_rows = sorted(node_values,
+                key=lambda x: (x[1] is None, x[1] if x[1] is not None else ""))
+        sorted_rows = sorted_rows[:report.rows]
+        # resolve all cell values
+        cell_grid: list[list[str]] = []
+        for node_id, _ in sorted_rows:
+            row_cells = [self._resolve_report_column(col.source, node_id) for col in report.columns]
+            cell_grid.append(row_cells)
+        # compute column widths for alignment
+        if report.align and cell_grid and report.columns:
+            headers = [col.header or col.source for col in report.columns]
+            col_widths = [max(len(h), max((len(row[i]) for row in cell_grid), default=0))
+                          for i, h in enumerate(headers)]
+            # determine if column is numeric (majority of values are numeric)
+            def _is_numeric_col(col_idx: int) -> bool:
+                vals = [row[col_idx] for row in cell_grid]
+                numeric = sum(1 for v in vals if v.lstrip("-").replace(".", "", 1).isdigit())
+                return numeric > len(vals) / 2
+            numeric_cols = [_is_numeric_col(i) for i in range(len(report.columns))]
+        lines = []
+        if report.title:
+            lines.append(report.title)
+        if report.align and cell_grid and report.columns:
+            # header row
+            padded_headers = []
+            for i, h in enumerate(headers):
+                w = col_widths[i]
+                padded_headers.append(h.rjust(w) if numeric_cols[i] else h.ljust(w))
+            lines.append("   " + " ".join(padded_headers))
+        for rank, (row_cells, (node_id, _)) in enumerate(zip(cell_grid, sorted_rows), 1):
+            if report.align and cell_grid and report.columns:
+                padded = []
+                for i, cell in enumerate(row_cells):
+                    w = col_widths[i]
+                    padded.append(cell.rjust(w) if numeric_cols[i] else cell.ljust(w))
+                lines.append(f"{rank}. {' '.join(padded)}")
+            else:
+                lines.append(f"{rank}. {' '.join(row_cells)}")
+        if not sorted_rows:
+            lines.append("(no data)")
+        return "\n".join(lines)
 
     def _resolve_channel_index(self, channel_label: str) -> int | None:
         return self.channel_index_map.get(channel_label)

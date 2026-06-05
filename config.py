@@ -346,8 +346,9 @@ class RepeatResponse:
 class CreateWaypointResponse:
     expiry_mins: float | None = None
     initial_flags: list[str] = field(default_factory=list)
-    randomly_in_zone: str | None = None            # place at a random point inside this zone
-    randomly_in_zone_group: str | None = None      # pick a random zone from the group, then a random point
+    randomly_in_zone: str | None = None              # place at a random point inside this zone
+    randomly_in_zone_group: str | None = None        # pick a random zone from the group, then a random point
+    randomly_near_location_meters: float | None = None  # spawn within N meters of triggering waypoint or node
     # Optional: also push to the Meshtastic mesh map
     mesh_name: str | None = None
     mesh_description: str = ""
@@ -398,6 +399,19 @@ class ForceRefreshWaypointResponse:
     max_meters: float | None = None
 
 
+@dataclass
+class TrackReceivedWaypointResponse:
+    initial_flags: list[str] = field(default_factory=list)
+    placer_flag: str | None = None
+    expiry_mins: float | None = None  # None = derive from packet expire; 0 packet = no expiry
+
+
+@dataclass
+class SendReportResponse:
+    report_label: str
+    target: "Target"
+
+
 Response = (
     SendMessageResponse
     | SendAlertResponse
@@ -422,6 +436,8 @@ Response = (
     | BroadcastWaypointResponse
     | DeleteMeshWaypointResponse
     | ForceRefreshWaypointResponse
+    | TrackReceivedWaypointResponse
+    | SendReportResponse
 )
 
 
@@ -465,6 +481,23 @@ class Event:
 # ---------------------------------------------------------------------------
 
 @dataclass
+class ReportColumn:
+    source: str              # node_id | node_shortname | node_longname | mutable variable label
+    header: str | None = None
+
+
+@dataclass
+class ReportDef:
+    label: str
+    sort_by: str             # mutable variable label (scope: node)
+    title: str | None = None
+    rows: int = 5
+    sort_order: str = "desc" # "asc" | "desc"
+    columns: list[ReportColumn] = field(default_factory=list)
+    align: bool = True
+
+
+@dataclass
 class GameConfig:
     channels: list[Channel] = field(default_factory=list)
     zones: list[Zone] = field(default_factory=list)
@@ -475,6 +508,7 @@ class GameConfig:
     groups: list[GroupDef] = field(default_factory=list)
     variables: list[Variable] = field(default_factory=list)
     mutable_variables: list[MutableVariableDef] = field(default_factory=list)
+    reports: list[ReportDef] = field(default_factory=list)
     events: list[Event] = field(default_factory=list)
 
 
@@ -576,6 +610,7 @@ def _parse_response(raw: dict) -> Response:
             initial_flags=raw.get("initial_flags", []),
             randomly_in_zone=raw.get("randomly_in_zone"),
             randomly_in_zone_group=raw.get("randomly_in_zone_group"),
+            randomly_near_location_meters=float(raw["randomly_near_location"]) if "randomly_near_location" in raw else None,
             mesh_name=raw.get("mesh_name"),
             mesh_description=raw.get("mesh_description", ""),
             mesh_icon=int(raw.get("mesh_icon", 0)),
@@ -614,6 +649,16 @@ def _parse_response(raw: dict) -> Response:
             flag_label=raw.get("flag_label"),
             max_meters=float(raw["max_meters"]) if "max_meters" in raw else None,
         )
+    if kind == "track_received_waypoint":
+        return TrackReceivedWaypointResponse(
+            initial_flags=raw.get("initial_flags", []),
+            placer_flag=raw.get("placer_flag"),
+            expiry_mins=float(raw["expiry_mins"]) if "expiry_mins" in raw else None,
+        )
+    if kind == "send_report":
+        if "report_label" not in raw:
+            raise ConfigError("send_report requires 'report_label'")
+        return SendReportResponse(report_label=raw["report_label"], target=_parse_target(raw))
     raise ConfigError(f"Unknown response type: {kind!r}")
 
 
@@ -857,6 +902,23 @@ def _validate(cfg: GameConfig) -> None:
         if mv.max is not None and mv.initial > mv.max:
             raise ConfigError(f"{mvctx}: initial must be <= max")
 
+    _REPORT_BUILTIN_SOURCES = frozenset({"node_id", "node_shortname", "node_longname"})
+    report_labels = {r.label for r in cfg.reports}
+    for rpt in cfg.reports:
+        rctx = f"Report {rpt.label!r}"
+        if rpt.sort_by not in mutable_var_labels:
+            raise ConfigError(f"{rctx}: sort_by {rpt.sort_by!r} not defined in mutable_variables")
+        mv = mutable_var_def_map.get(rpt.sort_by)
+        if mv and mv.scope != "node":
+            raise ConfigError(f"{rctx}: sort_by variable must have scope: node")
+        if rpt.sort_order not in ("asc", "desc"):
+            raise ConfigError(f"{rctx}: sort_order must be 'asc' or 'desc'")
+        if rpt.rows < 1:
+            raise ConfigError(f"{rctx}: rows must be >= 1")
+        for col in rpt.columns:
+            if col.source not in _REPORT_BUILTIN_SOURCES and col.source not in mutable_var_labels:
+                raise ConfigError(f"{rctx}: column source {col.source!r} is not a built-in token or mutable variable")
+
     _GROUP_KINDS = ("node", "zone", "waypoint")
     _member_pool = {"node": node_labels, "zone": zone_labels, "waypoint": waypoint_labels}
     for grp in cfg.groups:
@@ -977,14 +1039,24 @@ def _validate(cfg: GameConfig) -> None:
                         f"{ctx}: to_triggering_node is not valid for this trigger type (no node context)"
                     )
             if isinstance(resp, CreateWaypointResponse):
-                if resp.randomly_in_zone is not None and resp.randomly_in_zone_group is not None:
-                    raise ConfigError(f"{ctx}: create_waypoint randomly_in_zone and randomly_in_zone_group are mutually exclusive")
+                _placement_opts = [
+                    resp.randomly_in_zone,
+                    resp.randomly_in_zone_group,
+                    resp.randomly_near_location_meters,
+                ]
+                if sum(x is not None for x in _placement_opts) > 1:
+                    raise ConfigError(
+                        f"{ctx}: create_waypoint randomly_in_zone, randomly_in_zone_group, "
+                        f"and randomly_near_location are mutually exclusive"
+                    )
                 if resp.randomly_in_zone is not None:
                     _check_label(resp.randomly_in_zone, zone_labels, f"{ctx} create_waypoint randomly_in_zone")
                 elif resp.randomly_in_zone_group is not None:
                     _check_label(resp.randomly_in_zone_group, group_labels, f"{ctx} create_waypoint randomly_in_zone_group")
                     if group_kind.get(resp.randomly_in_zone_group) != "zone":
                         raise ConfigError(f"{ctx}: create_waypoint randomly_in_zone_group: group {resp.randomly_in_zone_group!r} must be kind 'zone'")
+                elif resp.randomly_near_location_meters is not None:
+                    pass  # valid in any context; runtime warns if no location available
                 elif not _has_node_context:
                     raise ConfigError(f"{ctx}: create_waypoint without randomly_in_zone requires a trigger that provides node context")
                 if resp.mesh_name is not None:
@@ -1019,6 +1091,17 @@ def _validate(cfg: GameConfig) -> None:
                     raise ConfigError(
                         f"{ctx}: destroy_waypoint is only valid in near_waypoint + target_flag events"
                     )
+            if isinstance(resp, TrackReceivedWaypointResponse):
+                if not isinstance(t, WaypointReceivedTrigger):
+                    raise ConfigError(
+                        f"{ctx}: track_received_waypoint is only valid in waypoint_received events"
+                    )
+                for flag_label in resp.initial_flags:
+                    _check_label(flag_label, flag_labels, f"{ctx} track_received_waypoint initial_flags")
+                if resp.placer_flag:
+                    _check_label(resp.placer_flag, flag_labels, f"{ctx} track_received_waypoint placer_flag")
+            if isinstance(resp, SendReportResponse):
+                _check_label(resp.report_label, report_labels, f"{ctx} send_report report_label")
             if isinstance(resp, (AddDynamicWaypointFlagResponse, RemoveDynamicWaypointFlagResponse)):
                 if not _can_add_remove_waypoint_flag:
                     raise ConfigError(
@@ -1277,6 +1360,21 @@ def load_config(path: str) -> GameConfig:
                 max_length=mv.get("max_length"),
             )
             for mv in raw.get("mutable_variables", [])
+        ],
+        reports=[
+            ReportDef(
+                label=r["label"],
+                sort_by=r["sort_by"],
+                title=r.get("title"),
+                rows=int(r.get("rows", 5)),
+                sort_order=r.get("sort_order", "desc"),
+                columns=[
+                    ReportColumn(source=c["source"], header=c.get("header"))
+                    for c in r.get("columns", [])
+                ],
+                align=bool(r.get("align", True)),
+            )
+            for r in raw.get("reports", [])
         ],
         events=[_parse_event(e) for e in raw.get("events", [])],
     )

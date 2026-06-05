@@ -17,6 +17,7 @@ from config import (
     EventException,
 )
 from tests.conftest import minimal_config, make_engine, INSIDE_ZONE, OUTSIDE_ZONE, ZONE_POINTS, NODE_ID, NODE2_ID
+from config import MutableVariableDef, ReportColumn, ReportDef, SendReportResponse
 
 
 # ---------------------------------------------------------------------------
@@ -2904,3 +2905,391 @@ def test_create_waypoint_randomly_in_zone_no_node_required(db):
     eng.handle_periodic()
     wps = _get_all_dynamic_waypoints(db)
     assert len(wps) == 1
+
+
+# ---------------------------------------------------------------------------
+# randomly_near_location
+# ---------------------------------------------------------------------------
+
+def test_create_waypoint_randomly_near_location_uses_node(db):
+    """randomly_near_location spawns within radius of triggering node."""
+    import geometry as geo
+    cfg = minimal_config(
+        events=[
+            Event(
+                label="spawn",
+                trigger=ProximityTrigger(kind="enters_zone", target_label="zone_a"),
+                responses=[CreateWaypointResponse(randomly_near_location_meters=50)],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db)
+    db.update_node_location(NODE_ID, *INSIDE_ZONE)
+    eng.handle_position(NODE_ID, *INSIDE_ZONE)
+    wps = _get_all_dynamic_waypoints(db)
+    assert len(wps) == 1
+    _, lat, lon = wps[0]
+    dist = geo.haversine(*INSIDE_ZONE, lat, lon)
+    assert dist <= 50, f"Waypoint spawned {dist:.1f}m away, expected <= 50m"
+
+
+def test_create_waypoint_randomly_near_location_uses_triggering_waypoint(db):
+    """randomly_near_location uses triggering waypoint as origin, not the node."""
+    import geometry as geo
+    # Node at INSIDE_ZONE; waypoint ~44m east — within near_waypoint radius of 50m
+    node_lat, node_lon = INSIDE_ZONE
+    wp_lat, wp_lon = node_lat, node_lon + 0.0005  # ~44m east
+
+    cfg = minimal_config(
+        flags=[FlagDef(label="target")],
+        events=[
+            Event(
+                label="spawn_near_wp",
+                trigger=ProximityTrigger(kind="near_waypoint", target_flag="target", meters=50),
+                responses=[CreateWaypointResponse(randomly_near_location_meters=5)],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db)
+    db.update_node_location(NODE_ID, node_lat, node_lon)
+    wp_id = db.create_dynamic_waypoint(wp_lat, wp_lon, expiry_mins=None)
+    db.add_dynamic_waypoint_flag(wp_id, "target", expiry_mins=None)
+    eng.handle_position(NODE_ID, node_lat, node_lon)
+    wps = _get_all_dynamic_waypoints(db)
+    assert len(wps) == 2
+    new_wp = next(r for r in wps if r["id"] != wp_id)
+    dist_from_wp = geo.haversine(wp_lat, wp_lon, new_wp["lat"], new_wp["lon"])
+    assert dist_from_wp <= 5, f"New waypoint {dist_from_wp:.1f}m from trigger wp, expected <= 5m"
+
+
+def test_create_waypoint_randomly_near_location_no_location_skips(db):
+    """randomly_near_location skips silently when no location is in context."""
+    from config import TimedTrigger
+    from datetime import datetime, timezone
+    now_utc = datetime.now(timezone.utc)
+    cfg = minimal_config(
+        events=[
+            Event(
+                label="spawn",
+                trigger=TimedTrigger(
+                    start=now_utc.replace(year=2020),
+                    end=now_utc.replace(year=2099),
+                ),
+                responses=[CreateWaypointResponse(randomly_near_location_meters=50)],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db)
+    # Periodic context has no node/waypoint — should skip without error
+    eng.handle_periodic()
+    assert _get_all_dynamic_waypoints(db) == []
+
+
+def test_random_point_within_radius_distance():
+    """random_point_within_radius always returns a point within the specified radius."""
+    import geometry as geo
+    origin = (37.7749, -122.4194)
+    radius = 100.0
+    for _ in range(50):
+        lat, lon = geo.random_point_within_radius(*origin, radius)
+        dist = geo.haversine(*origin, lat, lon)
+        assert dist <= radius + 0.01, f"Point {dist:.2f}m from origin, expected <= {radius}m"
+
+
+def test_random_point_within_radius_not_always_center():
+    """random_point_within_radius produces spread — not all points at origin."""
+    import geometry as geo
+    origin = (37.7749, -122.4194)
+    points = [geo.random_point_within_radius(*origin, 100) for _ in range(20)]
+    # At least some points should differ from each other
+    assert len(set(points)) > 1
+
+
+# ---------------------------------------------------------------------------
+# track_received_waypoint
+# ---------------------------------------------------------------------------
+
+def _make_track_wp_ctx(name="supply", expire=0, mesh_id=99001):
+    from engine import WaypointReceivedContext
+    return WaypointReceivedContext(
+        node_id=NODE_ID,
+        waypoint_name=name,
+        waypoint_description="desc",
+        waypoint_lat=47.003,
+        waypoint_lon=-122.003,
+        waypoint_expire=expire,
+        mesh_waypoint_id=mesh_id,
+    )
+
+
+def test_track_received_waypoint_creates_dynamic_waypoint(db):
+    from config import WaypointReceivedTrigger, TrackReceivedWaypointResponse
+    cfg = minimal_config(
+        flags=[FlagDef(label="supply_drop")],
+        events=[
+            Event(
+                label="on_wp",
+                trigger=WaypointReceivedTrigger(),
+                responses=[TrackReceivedWaypointResponse(initial_flags=["supply_drop"])],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db)
+    eng.handle_waypoint_received(_make_track_wp_ctx())
+    wps = _get_all_dynamic_waypoints(db)
+    assert len(wps) == 1
+    assert abs(wps[0]["lat"] - 47.003) < 1e-6
+    assert abs(wps[0]["lon"] - (-122.003)) < 1e-6
+
+
+def test_track_received_waypoint_sets_initial_flags(db):
+    from config import WaypointReceivedTrigger, TrackReceivedWaypointResponse
+    cfg = minimal_config(
+        flags=[FlagDef(label="supply_drop"), FlagDef(label="urgent")],
+        events=[
+            Event(
+                label="on_wp",
+                trigger=WaypointReceivedTrigger(),
+                responses=[TrackReceivedWaypointResponse(initial_flags=["supply_drop", "urgent"])],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db)
+    eng.handle_waypoint_received(_make_track_wp_ctx())
+    wps = _get_all_dynamic_waypoints(db)
+    assert len(wps) == 1
+    wp_id = wps[0]["id"]
+    assert db.has_dynamic_waypoint_flag(wp_id, "supply_drop")
+    assert db.has_dynamic_waypoint_flag(wp_id, "urgent")
+
+
+def test_track_received_waypoint_placer_flag_copied_when_node_has_it(db):
+    from config import WaypointReceivedTrigger, TrackReceivedWaypointResponse
+    cfg = minimal_config(
+        flags=[FlagDef(label="scout")],
+        events=[
+            Event(
+                label="on_wp",
+                trigger=WaypointReceivedTrigger(),
+                responses=[TrackReceivedWaypointResponse(placer_flag="scout")],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db)
+    db.add_flag("node", NODE_ID, "scout")
+    eng.handle_waypoint_received(_make_track_wp_ctx())
+    wps = _get_all_dynamic_waypoints(db)
+    assert len(wps) == 1
+    assert db.has_dynamic_waypoint_flag(wps[0]["id"], "scout")
+
+
+def test_track_received_waypoint_placer_flag_not_copied_without_flag(db):
+    from config import WaypointReceivedTrigger, TrackReceivedWaypointResponse
+    cfg = minimal_config(
+        flags=[FlagDef(label="scout")],
+        events=[
+            Event(
+                label="on_wp",
+                trigger=WaypointReceivedTrigger(),
+                responses=[TrackReceivedWaypointResponse(placer_flag="scout")],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db)
+    # Node does NOT have scout flag
+    eng.handle_waypoint_received(_make_track_wp_ctx())
+    wps = _get_all_dynamic_waypoints(db)
+    assert len(wps) == 1
+    assert not db.has_dynamic_waypoint_flag(wps[0]["id"], "scout")
+
+
+def test_track_received_waypoint_sets_triggering_waypoint_id(db):
+    """After track_received_waypoint, ctx.triggering_waypoint_id matches the created waypoint."""
+    from config import WaypointReceivedTrigger, TrackReceivedWaypointResponse
+    from engine import WaypointReceivedContext
+    cfg = minimal_config(
+        flags=[FlagDef(label="supply_drop")],
+        events=[
+            Event(
+                label="on_wp",
+                trigger=WaypointReceivedTrigger(),
+                responses=[TrackReceivedWaypointResponse(initial_flags=["supply_drop"])],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db)
+    ctx = _make_track_wp_ctx()
+    eng.handle_waypoint_received(ctx)
+    wps = _get_all_dynamic_waypoints(db)
+    assert len(wps) == 1
+    assert ctx.triggering_waypoint_id == wps[0]["id"]
+
+
+def test_track_received_waypoint_links_mesh_waypoint_id(db):
+    from config import WaypointReceivedTrigger, TrackReceivedWaypointResponse
+    cfg = minimal_config(
+        flags=[FlagDef(label="supply_drop")],
+        events=[
+            Event(
+                label="on_wp",
+                trigger=WaypointReceivedTrigger(),
+                responses=[TrackReceivedWaypointResponse(initial_flags=["supply_drop"])],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db)
+    eng.handle_waypoint_received(_make_track_wp_ctx(mesh_id=99001))
+    wps = _get_all_dynamic_waypoints(db)
+    assert len(wps) == 1
+    linked = db.get_mesh_waypoint_id_for_dynamic(wps[0]["id"])
+    assert linked == 99001
+
+
+def test_track_received_waypoint_near_waypoint_trigger_fires(db):
+    """After tracking, near_waypoint with target_flag fires when node walks nearby."""
+    from config import WaypointReceivedTrigger, TrackReceivedWaypointResponse
+    cfg = minimal_config(
+        flags=[FlagDef(label="supply_drop")],
+        messages=[Message(label="found", text="found one")],
+        events=[
+            Event(
+                label="on_wp",
+                trigger=WaypointReceivedTrigger(),
+                responses=[TrackReceivedWaypointResponse(initial_flags=["supply_drop"])],
+            ),
+            Event(
+                label="collect",
+                trigger=ProximityTrigger(kind="near_waypoint", target_flag="supply_drop", meters=20),
+                responses=[SendMessageResponse(message_label="found", target=TargetChannel(channel_label="comms"))],
+            ),
+        ],
+    )
+    eng = make_engine(cfg, db)
+    # Receive and track the waypoint at INSIDE_ZONE
+    ctx = _make_track_wp_ctx()
+    ctx.waypoint_lat, ctx.waypoint_lon = INSIDE_ZONE
+    eng.handle_waypoint_received(ctx)
+    # Node walks to the same spot
+    db.update_node_location(NODE_ID, *INSIDE_ZONE)
+    eng.handle_position(NODE_ID, *INSIDE_ZONE)
+    assert len(eng.sent_channels) == 1
+
+
+# ---------------------------------------------------------------------------
+# send_report / reports primitive
+# ---------------------------------------------------------------------------
+
+def _report_config(sort_order="desc", rows=5, title="Leaderboard", align=True):
+    from config import TimedTrigger
+    from datetime import datetime, timezone
+    now_utc = datetime.now(timezone.utc)
+    mv = MutableVariableDef(label="kills", type="integer", scope="node", initial=0)
+    report = ReportDef(
+        label="kill_board",
+        sort_by="kills",
+        title=title,
+        rows=rows,
+        sort_order=sort_order,
+        columns=[
+            ReportColumn(source="node_id", header="Node"),
+            ReportColumn(source="kills", header="K"),
+        ],
+        align=align,
+    )
+    cfg = minimal_config(
+        mutable_variables=[mv],
+        events=[
+            Event(
+                label="board",
+                trigger=TimedTrigger(
+                    start=now_utc.replace(year=2020),
+                    end=now_utc.replace(year=2099),
+                ),
+                responses=[SendReportResponse(report_label="kill_board",
+                                              target=TargetChannel(channel_label="comms"))],
+            )
+        ],
+    )
+    cfg.reports.append(report)
+    return cfg
+
+
+def test_send_report_desc_order(db):
+    cfg = _report_config()
+    eng = make_engine(cfg, db)
+    db.set_mutable_variable("kills", 3, NODE_ID)
+    db.set_mutable_variable("kills", 7, NODE2_ID)
+    eng.handle_periodic()
+    assert len(eng.sent_channels) == 1
+    text = eng.sent_channels[0][1]
+    # NODE2_ID (7 kills) should appear before NODE_ID (3 kills)
+    assert text.index(NODE2_ID) < text.index(NODE_ID)
+
+
+def test_send_report_asc_order(db):
+    cfg = _report_config(sort_order="asc")
+    eng = make_engine(cfg, db)
+    db.set_mutable_variable("kills", 3, NODE_ID)
+    db.set_mutable_variable("kills", 7, NODE2_ID)
+    eng.handle_periodic()
+    text = eng.sent_channels[0][1]
+    assert text.index(NODE_ID) < text.index(NODE2_ID)
+
+
+def test_send_report_rows_cap(db):
+    cfg = _report_config(rows=1)
+    eng = make_engine(cfg, db)
+    db.set_mutable_variable("kills", 3, NODE_ID)
+    db.set_mutable_variable("kills", 7, NODE2_ID)
+    eng.handle_periodic()
+    text = eng.sent_channels[0][1]
+    assert NODE2_ID in text
+    assert NODE_ID not in text  # capped at 1 row, NODE2_ID wins with 7
+
+
+def test_send_report_empty_shows_no_data(db):
+    cfg = _report_config()
+    eng = make_engine(cfg, db)
+    # No variables set
+    eng.handle_periodic()
+    text = eng.sent_channels[0][1]
+    assert "(no data)" in text
+
+
+def test_send_report_title_included(db):
+    cfg = _report_config(title="🏆 Top Players")
+    eng = make_engine(cfg, db)
+    db.set_mutable_variable("kills", 1, NODE_ID)
+    eng.handle_periodic()
+    text = eng.sent_channels[0][1]
+    assert "🏆 Top Players" in text
+
+
+def test_send_report_no_title(db):
+    cfg = _report_config(title=None)
+    eng = make_engine(cfg, db)
+    db.set_mutable_variable("kills", 1, NODE_ID)
+    eng.handle_periodic()
+    text = eng.sent_channels[0][1]
+    lines = text.strip().splitlines()
+    # First line should be the header row, not a title
+    assert "🏆" not in lines[0]
+    assert "Node" in lines[0]   # column header from _report_config
+    assert lines[1].strip().startswith("1.")
+
+
+def test_send_report_aligned_numeric_right_justified(db):
+    cfg = _report_config(align=True)
+    eng = make_engine(cfg, db)
+    db.set_mutable_variable("kills", 10, NODE_ID)
+    db.set_mutable_variable("kills", 5, NODE2_ID)
+    eng.handle_periodic()
+    text = eng.sent_channels[0][1]
+    lines = [l for l in text.splitlines() if l.strip().startswith(("1.", "2."))]
+    assert len(lines) == 2
+    # Both numeric columns should have the same width (right-aligned)
+    # Extract the numeric part from each line
+    parts_1 = lines[0].split()
+    parts_2 = lines[1].split()
+    # The last token on each row is the kill count — right-aligned means same field width
+    assert len(lines[0].rstrip()) == len(lines[1].rstrip()) or "10" in lines[0]

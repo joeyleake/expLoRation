@@ -311,7 +311,50 @@ events:
         - laser_target
 ```
 `create_waypoint` requires node context — it CANNOT appear directly in a
-`time_window` or `in_zone_on_start` event. Always wrap it in `with_node`.
+`time_window` or `in_zone_on_start` event unless `randomly_in_zone` or
+`randomly_in_zone_group` is set. Always wrap it in `with_node` otherwise.
+
+**Placement options** (mutually exclusive):
+
+| Field | Behaviour |
+|---|---|
+| *(none)* | At the triggering node's current location |
+| `randomly_in_zone: <label>` | Random point inside the named zone triangle |
+| `randomly_in_zone_group: <label>` | Random zone from group, then random point in it |
+| `randomly_near_location: <meters>` | Within N meters of triggering waypoint (if any), else triggering node |
+
+`randomly_near_location` is ideal for spawning near a game object that just triggered an event
+— e.g. spawn a replacement zombie within 30m of the one just killed:
+
+```yaml
+- label: zombie_reinforcement
+  trigger:
+    type: near_waypoint
+    target_flag: zombie
+    meters: 10
+  responses:
+    - type: destroy_waypoint
+    - type: create_waypoint
+      randomly_near_location: 30
+      initial_flags:
+        - zombie
+      mesh_name: "🧟 zombie #{waypoint_id}"
+      mesh_icon: 129503
+      mesh_channel: comms
+```
+
+Combine with `with_node` to spawn near a specific player instead:
+
+```yaml
+- type: with_node
+  to_all_with_flag: player
+  random_n: 1
+  responses:
+    - type: create_waypoint
+      randomly_near_location: 50
+      initial_flags:
+        - objective
+```
 
 *Blast radius / area effect:*
 ```yaml
@@ -615,6 +658,90 @@ events:
 Available interpolation tokens: `{waypoint_name}`, `{waypoint_description}`,
 `{waypoint_lat}`, `{waypoint_lon}`, `{node_id}` (sender's hex ID).
 
+**`track_received_waypoint`** — converts the received waypoint into a tracked
+`dynamic_waypoint` so all existing machinery (`near_waypoint`, `flag_expired`,
+`destroy_waypoint`, `delete_mesh_waypoint`) works on it. Must appear in a
+`waypoint_received` event. After it executes, subsequent responses in the same
+event can reference the waypoint as the triggering waypoint.
+
+```yaml
+flags:
+  - label: supply_drop
+  - label: scout
+
+events:
+  - label: track_supply
+    trigger:
+      type: waypoint_received
+      from_flag: scout
+    responses:
+      - type: track_received_waypoint
+        initial_flags:
+          - supply_drop       # always applied to the waypoint
+        placer_flag: scout    # also flag the waypoint with 'scout' if the placing node has it
+        expiry_mins: 60       # optional override; defaults to the packet's own expire time
+      - type: send_message
+        message_label: supply_ack
+        to_triggering_node: true
+
+  - label: collect_supply
+    trigger:
+      type: near_waypoint
+      target_flag: supply_drop
+      meters: 10
+    responses:
+      - type: send_message
+        message_label: collected
+        to_channel: ops_channel
+      - type: delete_mesh_waypoint
+        use_triggering_waypoint: true
+      - type: destroy_waypoint
+```
+
+`placer_flag` lets a waypoint inherit the placer's role — if the placing node has the
+`scout` flag, the waypoint also gets tagged `scout`, so later triggers can distinguish
+waypoints by who dropped them.
+
+**Leaderboards and reports:**
+Define a `reports:` entry and dispatch it with `send_report`. Rows are per-node,
+ranked by a mutable variable. Text columns left-align, numeric columns right-align.
+
+```yaml
+mutable_variables:
+  - label: score
+    type: integer
+    scope: node
+    initial: 0
+
+reports:
+  - label: scoreboard
+    title: "🏆 Leaderboard"
+    sort_by: score
+    sort_order: desc
+    rows: 5
+    columns:
+      - source: node_shortname
+        header: Player
+      - source: score
+        header: Score
+
+events:
+  - label: hourly_board
+    trigger:
+      type: time_window
+      start: "2020-01-01T00:00:00"
+      end:   "2099-01-01T00:00:00"
+    auto_recur: true
+    recur_mins: 60
+    responses:
+      - type: send_report
+        report_label: scoreboard
+        to_channel: game_channel
+```
+
+`send_report` also works as a DM response — e.g. `to_triggering_node: true` in a
+command event so a player can request the leaderboard on demand.
+
 **Triangular zones:**
 Zones must have exactly 3 points. Cover rectangular areas with two triangles:
 ```yaml
@@ -645,6 +772,7 @@ Before outputting any YAML, mentally verify:
 
 - [ ] Every label referenced in a trigger, response, or exception is defined in its section
 - [ ] Every `near_waypoint`, `near_zone`, `near_node` trigger has `meters`
+- [ ] `create_waypoint randomly_near_location` only appears in node-context or waypoint-context events (not bare `time_window`)
 - [ ] Every `*_zone_group` / `in_zone_group` / `in_zone_group_on_start` trigger has `target`, and the referenced group has `kind: zone`
 - [ ] Every `channel` trigger has `channel_label`
 - [ ] Every `zone_has_flag`/`waypoint_has_flag` exception has `target` (or is in a dynamic waypoint context)
@@ -653,6 +781,7 @@ Before outputting any YAML, mentally verify:
   (`enters_zone`, `leaves_zone`, `near_waypoint`, `near_node`, `dm`, `channel`, `flag_expired` with `target_kind: node`)
 - [ ] `add_waypoint_flag`, `remove_waypoint_flag`, `destroy_waypoint` only appear
   in `near_waypoint` + `target_flag` or `flag_expired` + `dynamic_waypoint` events
+- [ ] `track_received_waypoint` only appears in `waypoint_received` events
 - [ ] `to_triggering_node` is not used in `time_window`, `in_zone_on_start`,
   `waypoint_expired`, or `flag_expired` with non-node `target_kind`
 - [ ] `to_all_near_triggering_waypoint` only used in dynamic waypoint context
@@ -675,6 +804,7 @@ Before outputting any YAML, mentally verify:
 - [ ] `delete_mesh_waypoint`: exactly one of `label` or `use_triggering_waypoint` is set;
   `use_triggering_waypoint: true` only valid when the triggering dynamic waypoint was created
   with `mesh_*` fields
+- [ ] `send_report`: `report_label` references a defined `reports:` entry; `sort_by` variable is `scope: node`; all column `source` values are built-in tokens or `scope: node` mutable variable labels
 
 ## Reference examples
 

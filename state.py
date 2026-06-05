@@ -438,6 +438,27 @@ class GameState:
             )
             self._conn.commit()
 
+    def get_all_node_variable_values(
+        self, label: str
+    ) -> list[tuple[str, int | float | str | None]]:
+        """Return [(node_id, value), ...] for all nodes with a record for this variable."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT node_id, value_int, value_real, value_text "
+                "FROM mutable_variables WHERE label=? AND node_id != ''",
+                (label,),
+            ).fetchall()
+        result = []
+        for r in rows:
+            if r["value_int"] is not None:
+                v = r["value_int"]
+            elif r["value_real"] is not None:
+                v = r["value_real"]
+            else:
+                v = r["value_text"]
+            result.append((r["node_id"], v))
+        return result
+
     def init_mutable_variables(self, config: "GameConfig") -> None:
         with self._lock:
             for mv in config.mutable_variables:
