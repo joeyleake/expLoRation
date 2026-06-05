@@ -1,0 +1,398 @@
+# Zombie Minigame — No-zone zombie hunting game with leaderboard
+# Players DM !spawn to summon zombies within 200m. Kill them by walking within 20m.
+# 25% chance each kill spawns 2 zombie ambushers near the corpse.
+# Leaderboard tracks kills. Active players get nearby waypoints auto-refreshed.
+
+flags:
+  - label: zombie
+    expiry_mins: 60
+  - label: zombie_ambusher
+    expiry_mins: 15
+  - label: active
+    expiry_mins: 120
+  - label: spawn_cooldown
+    expiry_mins: 60
+
+mutable_variables:
+  - label: zombie_kills
+    type: integer
+    scope: node
+    initial: 0
+
+reports:
+  - label: zombie_board
+    sort_by: zombie_kills
+    sort_order: desc
+    rows: 5
+    columns:
+      - source: node_shortname
+        header: Player
+      - source: zombie_kills
+        header: Kills
+
+messages:
+  # ---------------------------------------------------------------------------
+  # Commands
+  # ---------------------------------------------------------------------------
+  - label: spawn_cmd
+    text: "!spawn"
+
+  - label: leaderboard_cmd
+    text: "!leaderboard"
+
+  - label: help_cmd
+    text: "!help"
+
+  - label: update_cmd
+    text: "!update"
+
+  - label: help_msg
+    text: |
+      🧟 Meshtastic Zombie Minigame
+      Walk within 20m of a zombie to kill it.
+      !spawn — summon 5 zombies near you (1hr cooldown)
+      !leaderboard — view top kill counts
+      !update — request location update
+
+  - label: update_ack
+    text: "📡 Requesting your location..."
+
+  - label: spawn_flavor
+    text: "🧟‍♀️ The earth around you begins to shift. Rotting hands claw upward through the soil as nearby zombies drag themselves into the world. [check map]"
+
+  - label: ambush_flavor
+    text: "⚠️ Two corpses emerge from the shadows, drawn by the sound of combat."
+
+  - label: spawn_cooldown_msg
+    text: "⏳ You already raised the dead once this hour."
+
+  - label: spawn_ready_msg
+    text: "🪦 The dead have returned to the earth. You are free to disturb them once more."
+
+  # ---------------------------------------------------------------------------
+  # Kill messages — one chosen at random per zombie eliminated
+  # ---------------------------------------------------------------------------
+  - label: kill_1
+    text: "🗡️ You introduced a zombie to the pointy end."
+  - label: kill_2
+    text: "💀 Zombie upgraded from undead to re-dead."
+  - label: kill_3
+    text: "🦴 Zombie down. The wildlife will clean up the rest."
+  - label: kill_4
+    text: "🪦 You put a zombie back where you found it."
+  - label: kill_5
+    text: "🧠 Successful emergency brain-ectomy."
+  - label: kill_6
+    text: "🎲 The zombie rolled a natural 1 on its saving throw. RIP."
+  - label: kill_7
+    text: "🍖 You made a neat pile of zombie bits."
+  - label: kill_8
+    text: "🫟 Zombie reduced to \"biological paste\"."
+  - label: kill_9
+    text: "🪓 SPLAT. I hope you didn't get any on you."
+  - label: kill_10
+    text: "🏹 Head shot! I don't think you want that arrow back."
+
+events:
+  # ---------------------------------------------------------------------------
+  # !spawn — summon 5 zombies within 200m (1-hour per-node cooldown)
+  # Tags the player as 'active' for 2 hours (resets if already active)
+  # ---------------------------------------------------------------------------
+  - label: cmd_spawn_blocked
+    trigger:
+      type: dm
+      message_label: spawn_cmd
+    trigger_per_node: true
+    reset_mins: 1
+    exceptions:
+      - kind: node_lacks_flag
+        flag: spawn_cooldown
+    responses:
+      - type: send_message
+        message_label: spawn_cooldown_msg
+        to_triggering_node: true
+
+  - label: cmd_spawn
+    trigger:
+      type: dm
+      message_label: spawn_cmd
+    trigger_per_node: true
+    exceptions:
+      - kind: node_has_flag
+        flag: spawn_cooldown
+    responses:
+      - type: add_flag
+        flag_label: spawn_cooldown
+        to_triggering_node: true
+      - type: add_flag
+        flag_label: active
+        to_triggering_node: true
+      - type: send_message
+        message_label: spawn_flavor
+        to_triggering_node: true
+      - type: repeat
+        count: 5
+        responses:
+          - type: create_waypoint
+            randomly_near_location: 200
+            expiry_mins: 60
+            initial_flags:
+              - zombie
+            mesh_name: "🧟 zombie #{waypoint_id}"
+            mesh_icon: 129503      # 🧟
+            mesh_to_triggering_node: true
+            refresh_cooldown_mins: 2
+
+  # ---------------------------------------------------------------------------
+  # 25% chance ambusher spawn on zombie kill — fires BEFORE kill_zombie so
+  # the zombie's location is still in the DB when randomly_near_location runs.
+  # ---------------------------------------------------------------------------
+  - label: zombie_ambush_spawn
+    trigger:
+      type: near_waypoint
+      target_flag: zombie
+      meters: 20
+    exceptions:
+      - kind: random_skip
+        chance: 0.75
+    responses:
+      - type: send_message
+        message_label: ambush_flavor
+        to_triggering_node: true
+      - type: repeat
+        count: 2
+        responses:
+          - type: create_waypoint
+            randomly_near_location: 100
+            expiry_mins: 15
+            initial_flags:
+              - zombie_ambusher
+            mesh_name: "🧟 ambusher #{waypoint_id}"
+            mesh_icon: 129503    # 🧟
+            mesh_to_triggering_node: true
+            refresh_cooldown_mins: 2
+
+  # ---------------------------------------------------------------------------
+  # Kill a regular zombie — walk within 10 meters.
+  # ---------------------------------------------------------------------------
+  - label: kill_zombie
+    trigger:
+      type: near_waypoint
+      target_flag: zombie
+      meters: 20
+    responses:
+      - type: random_options
+        options:
+          - weight: 1
+            responses:
+              - type: send_message
+                message_label: kill_1
+                to_triggering_node: true
+          - weight: 1
+            responses:
+              - type: send_message
+                message_label: kill_2
+                to_triggering_node: true
+          - weight: 1
+            responses:
+              - type: send_message
+                message_label: kill_3
+                to_triggering_node: true
+          - weight: 1
+            responses:
+              - type: send_message
+                message_label: kill_4
+                to_triggering_node: true
+          - weight: 1
+            responses:
+              - type: send_message
+                message_label: kill_5
+                to_triggering_node: true
+          - weight: 1
+            responses:
+              - type: send_message
+                message_label: kill_6
+                to_triggering_node: true
+          - weight: 1
+            responses:
+              - type: send_message
+                message_label: kill_7
+                to_triggering_node: true
+          - weight: 1
+            responses:
+              - type: send_message
+                message_label: kill_8
+                to_triggering_node: true
+          - weight: 1
+            responses:
+              - type: send_message
+                message_label: kill_9
+                to_triggering_node: true
+          - weight: 1
+            responses:
+              - type: send_message
+                message_label: kill_10
+                to_triggering_node: true
+      - type: increment_variable
+        variable_label: zombie_kills
+        amount: 1
+        to_triggering_node: true
+      - type: delete_mesh_waypoint
+        use_triggering_waypoint: true
+      - type: destroy_waypoint
+
+  # ---------------------------------------------------------------------------
+  # Kill a zombie ambusher — same kill mechanics, no chain spawn.
+  # ---------------------------------------------------------------------------
+  - label: kill_ambusher
+    trigger:
+      type: near_waypoint
+      target_flag: zombie_ambusher
+      meters: 20
+    responses:
+      - type: random_options
+        options:
+          - weight: 1
+            responses:
+              - type: send_message
+                message_label: kill_1
+                to_triggering_node: true
+          - weight: 1
+            responses:
+              - type: send_message
+                message_label: kill_2
+                to_triggering_node: true
+          - weight: 1
+            responses:
+              - type: send_message
+                message_label: kill_3
+                to_triggering_node: true
+          - weight: 1
+            responses:
+              - type: send_message
+                message_label: kill_4
+                to_triggering_node: true
+          - weight: 1
+            responses:
+              - type: send_message
+                message_label: kill_5
+                to_triggering_node: true
+          - weight: 1
+            responses:
+              - type: send_message
+                message_label: kill_6
+                to_triggering_node: true
+          - weight: 1
+            responses:
+              - type: send_message
+                message_label: kill_7
+                to_triggering_node: true
+          - weight: 1
+            responses:
+              - type: send_message
+                message_label: kill_8
+                to_triggering_node: true
+          - weight: 1
+            responses:
+              - type: send_message
+                message_label: kill_9
+                to_triggering_node: true
+          - weight: 1
+            responses:
+              - type: send_message
+                message_label: kill_10
+                to_triggering_node: true
+      - type: increment_variable
+        variable_label: zombie_kills
+        amount: 1
+        to_triggering_node: true
+      - type: delete_mesh_waypoint
+        use_triggering_waypoint: true
+      - type: destroy_waypoint
+
+  # ---------------------------------------------------------------------------
+  # Active player proximity refresh — re-broadcast the nearest zombie within
+  # 100m whenever an active player's position updates near one.
+  # refresh_cooldown_mins: 2 on waypoints prevents channel flooding.
+  # ---------------------------------------------------------------------------
+  - label: active_player_refresh
+    trigger:
+      type: near_waypoint
+      target_flag: zombie
+      meters: 100
+    exceptions:
+      - kind: node_lacks_flag
+        flag: active
+    responses:
+      - type: force_refresh_waypoint
+        flag_label: zombie
+        max_meters: 100
+
+  # ---------------------------------------------------------------------------
+  # Mesh waypoint cleanup on natural expiry
+  # ---------------------------------------------------------------------------
+  - label: zombie_expired
+    trigger:
+      type: flag_expired
+      flag_label: zombie
+      target_kind: dynamic_waypoint
+    responses:
+      - type: delete_mesh_waypoint
+        use_triggering_waypoint: true
+
+  - label: ambusher_expired
+    trigger:
+      type: flag_expired
+      flag_label: zombie_ambusher
+      target_kind: dynamic_waypoint
+    responses:
+      - type: delete_mesh_waypoint
+        use_triggering_waypoint: true
+
+  - label: spawn_cooldown_expired
+    trigger:
+      type: flag_expired
+      flag_label: spawn_cooldown
+      target_kind: node
+    responses:
+      - type: send_message
+        message_label: spawn_ready_msg
+        to_triggering_node: true
+
+  # ---------------------------------------------------------------------------
+  # Player commands
+  # ---------------------------------------------------------------------------
+  - label: cmd_leaderboard
+    trigger:
+      type: dm
+      message_label: leaderboard_cmd
+    trigger_per_node: true
+    reset_mins: 1
+    responses:
+      - type: send_report
+        report_label: zombie_board
+        to_triggering_node: true
+
+  - label: cmd_help
+    trigger:
+      type: dm
+      message_label: help_cmd
+    trigger_per_node: true
+    reset_mins: 1
+    responses:
+      - type: send_message
+        message_label: help_msg
+        to_triggering_node: true
+
+  - label: cmd_update
+    trigger:
+      type: dm
+      message_label: update_cmd
+    trigger_per_node: true
+    reset_mins: 1
+    responses:
+      - type: send_message
+        message_label: update_ack
+        to_triggering_node: true
+      - type: request_location
+        to_triggering_node: true

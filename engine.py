@@ -1268,25 +1268,43 @@ class Engine:
                     if datetime.now(timezone.utc) - last_dt < timedelta(minutes=cooldown_mins):
                         log.debug("force_refresh_waypoint: cooldown active for wp %d", wid)
                         return
-            ch_idx = self._resolve_channel_index(nearest["channel"]) if nearest["channel"] else None
-            if ch_idx is None:
-                log.warning("force_refresh_waypoint: channel %r not mapped for wp %d",
-                            nearest["channel"], wid)
-                return
-            from meshtastic import BROADCAST_ADDR as _BCAST
             expire_ts = (int(datetime.fromisoformat(nearest["expires_at"]).timestamp())
                          if nearest["expires_at"] else 0)
-            def _fn(n=nearest["name"], d=nearest["description"], ic=nearest["icon"],
-                    ex=expire_ts, wid_=wid, la=nearest["lat"], lo=nearest["lon"],
-                    ci=ch_idx, ba=_BCAST):
-                if self.interface is None:
+            ch_idx = self._resolve_channel_index(nearest["channel"]) if nearest["channel"] else None
+            if ch_idx is not None:
+                from meshtastic import BROADCAST_ADDR as _BCAST
+                def _fn(n=nearest["name"], d=nearest["description"], ic=nearest["icon"],
+                        ex=expire_ts, wid_=wid, la=nearest["lat"], lo=nearest["lon"],
+                        ci=ch_idx, ba=_BCAST):
+                    if self.interface is None:
+                        return
+                    self.interface.sendWaypoint(
+                        name=n, description=d, icon=ic, expire=ex,
+                        waypoint_id=wid_, latitude=la, longitude=lo,
+                        destinationId=ba, channelIndex=ci,
+                    )
+                    log.info("force_refresh_waypoint broadcast %r ch%d (id=%d)", n, ci, wid_)
+            elif node_id:
+                # Waypoint was originally sent via DM — re-DM to the triggering node
+                try:
+                    dest = int(node_id.lstrip("!"), 16)
+                except ValueError:
+                    log.warning("force_refresh_waypoint: invalid node_id %r", node_id)
                     return
-                self.interface.sendWaypoint(
-                    name=n, description=d, icon=ic, expire=ex,
-                    waypoint_id=wid_, latitude=la, longitude=lo,
-                    destinationId=ba, channelIndex=ci,
-                )
-                log.info("force_refresh_waypoint broadcast %r ch%d (id=%d)", n, ci, wid_)
+                def _fn(n=nearest["name"], d=nearest["description"], ic=nearest["icon"],
+                        ex=expire_ts, wid_=wid, la=nearest["lat"], lo=nearest["lon"],
+                        de=dest):
+                    if self.interface is None:
+                        return
+                    self.interface.sendWaypoint(
+                        name=n, description=d, icon=ic, expire=ex,
+                        waypoint_id=wid_, latitude=la, longitude=lo,
+                        destinationId=de, channelIndex=0,
+                    )
+                    log.info("force_refresh_waypoint DM %r → !%08x (id=%d)", n, de, wid_)
+            else:
+                log.warning("force_refresh_waypoint: no channel and no node_id for wp %d", wid)
+                return
             self._enqueue("force_refresh_waypoint", _fn)
             self.state.mark_waypoints_refreshed([wid])
 
@@ -1605,6 +1623,13 @@ class Engine:
         lines = []
         if report.title:
             lines.append(report.title)
+        if report.align and cell_grid and report.columns:
+            # header row
+            padded_headers = []
+            for i, h in enumerate(headers):
+                w = col_widths[i]
+                padded_headers.append(h.rjust(w) if numeric_cols[i] else h.ljust(w))
+            lines.append("   " + " ".join(padded_headers))
         for rank, (row_cells, (node_id, _)) in enumerate(zip(cell_grid, sorted_rows), 1):
             if report.align and cell_grid and report.columns:
                 padded = []

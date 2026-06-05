@@ -707,9 +707,18 @@ columns are right-aligned, all padded to their column's max width:
 
 ```
 🏆 Top Zombie Hunters
-1. Eelshop    12
-2. ABCD        8
-3. !ff001122   3
+   Player    Kills
+1. Eelshop      12
+2. ABCD          8
+3. !ff001122     3
+```
+
+Omit `title` to lead with the header row directly:
+
+```
+   Player    Kills
+1. Eelshop      12
+2. ABCD          8
 ```
 
 | Field | Required | Description |

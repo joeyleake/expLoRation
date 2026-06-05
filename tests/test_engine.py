@@ -3271,8 +3271,11 @@ def test_send_report_no_title(db):
     db.set_mutable_variable("kills", 1, NODE_ID)
     eng.handle_periodic()
     text = eng.sent_channels[0][1]
-    # Should start with "1." (rank), not a title line
-    assert text.strip().startswith("1.")
+    lines = text.strip().splitlines()
+    # First line should be the header row, not a title
+    assert "🏆" not in lines[0]
+    assert "Node" in lines[0]   # column header from _report_config
+    assert lines[1].strip().startswith("1.")
 
 
 def test_send_report_aligned_numeric_right_justified(db):
