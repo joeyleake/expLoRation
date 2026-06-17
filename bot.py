@@ -212,6 +212,7 @@ def on_receive(packet: dict, interface, engine: Engine, verbose: bool = False) -
             waypoint_lat=lat,
             waypoint_lon=lon,
             waypoint_expire=waypoint.get("expire", 0),
+            waypoint_icon=waypoint.get("icon", 0),
             mesh_waypoint_id=waypoint.get("id"),
         )
         log.debug("Waypoint received from %s: %r", node_id, waypoint.get("name", ""))

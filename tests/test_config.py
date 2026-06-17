@@ -400,7 +400,7 @@ events: []
 
 def test_create_waypoint_without_node_context_raises(tmp_yaml):
     """create_waypoint is invalid inside a timed trigger (no node context)."""
-    with pytest.raises(ConfigError, match="create_waypoint requires"):
+    with pytest.raises(ConfigError, match="create_waypoint without randomly_in_zone requires"):
         load_config(tmp_yaml(valid_yaml(ZONE_YAML, FLAG_YAML, """\
 events:
   - label: ev

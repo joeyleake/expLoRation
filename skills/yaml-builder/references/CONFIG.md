@@ -147,7 +147,7 @@ messages:
 Place `{variable_label}` anywhere in a message `text` field. Tokens are replaced
 at send time with the resolved value.
 
-Four built-in tokens are always available:
+Built-in tokens are always available:
 
 | Token | Resolves to |
 |---|---|
@@ -155,6 +155,18 @@ Four built-in tokens are always available:
 | `{node_shortname}` | The triggering node's shortName (e.g. `JOEY`), falling back to node ID if name is unavailable |
 | `{node_longname}` | The triggering node's longName (e.g. `Joey's Radio`), falling back to node ID if name is unavailable |
 | `{zone}` | The zone label the triggering node most recently entered or is currently in, or `[unknown]` |
+| `{date}` | Current date as `YYYY-MM-DD` at the moment the event fires |
+| `{time}` | Current time as `HH:MM` at the moment the event fires |
+
+Inside `waypoint_received` events, these additional tokens are also available in message text and in `track_received_waypoint` override fields:
+
+| Token | Resolves to |
+|---|---|
+| `{waypoint_name}` | The name the placing node gave the waypoint |
+| `{waypoint_description}` | The description field of the received waypoint |
+| `{waypoint_lat}` | Latitude of the received waypoint (5 decimal places) |
+| `{waypoint_lon}` | Longitude of the received waypoint (5 decimal places) |
+| `{waypoint_icon}` | The Meshtastic icon code of the received waypoint as a string |
 
 For user-defined variable tokens, see the [Variables](#variables) section. If
 resolution fails, the fallback strings are:
@@ -810,8 +822,8 @@ trigger:
 | `meters` | yes | Radius in metres. The trigger fires if the node is within this distance. |
 
 When `target_flag` is used, the nearest in-range dynamic waypoint becomes the
-`triggering_waypoint_id` for responses like `to_all_near_triggering_waypoint`,
-`add_waypoint_flag`, `remove_waypoint_flag`, and `destroy_waypoint`.
+`triggering_waypoint_id` for responses like `with_each_nearby_waypoint`,
+`with_each_nearby_node`, `add_waypoint_flag`, `remove_waypoint_flag`, and `destroy_waypoint`.
 
 #### `near_zone` — node enters zone proximity
 
@@ -1170,7 +1182,7 @@ trigger:
 
 **Notes:**
 - When `target_kind: dynamic_waypoint`, responses have access to waypoint
-  context (`to_all_near_triggering_waypoint`, `add_waypoint_flag`, etc.).
+  context (`with_each_nearby_waypoint`, `with_each_nearby_node`, `add_waypoint_flag`, etc.).
 - When `target_kind: node`, responses have access to node context
   (`to_triggering_node`).
 - For other `target_kind` values there is no triggering node, so
@@ -1500,7 +1512,45 @@ dynamic waypoint at their location).
 **Restrictions inside `with_node`:**
 - `destroy_waypoint`, `add_waypoint_flag`, and `remove_waypoint_flag` are not
   valid inside `with_node` (no triggering waypoint context).
-- `to_all_near_triggering_waypoint` is not valid inside `with_node`.
+
+#### `with_each_nearby_waypoint` — execute responses for every flagged waypoint within a radius
+
+Iterates all dynamic waypoints carrying `flag_label` within `meters` of the triggering waypoint.
+Executes inner responses once per match with `ctx.triggering_waypoint_id` set to each. Use for
+area-effect mechanics that destroy, tag, or otherwise affect groups of waypoints.
+
+```yaml
+- type: with_each_nearby_waypoint
+  flag_label: zombie        # only waypoints with this flag
+  meters: 50
+  responses:
+    - type: delete_mesh_waypoint    # delete_mesh_waypoint before destroy_waypoint —
+      use_triggering_waypoint: true # destroy removes the row holding the mesh ID
+    - type: destroy_waypoint
+    - type: increment_variable
+      variable_label: grenade_kills
+      amount: 1
+      to_triggering_node: true
+```
+
+#### `with_each_nearby_node` — execute responses for every node within a radius of the triggering waypoint
+
+Iterates all located nodes within `meters` of the triggering waypoint (optionally filtered by
+`flag_label`). Executes inner responses once per match with `ctx.node_id` set to each. Use for
+area-effect mechanics that tag, message, or otherwise affect groups of players.
+
+```yaml
+- type: with_each_nearby_node
+  meters: 1609
+  flag_label: player        # optional — only nodes with this flag
+  responses:
+    - type: add_flag
+      flag_label: in_blast_zone
+      to_triggering_node: true
+    - type: send_message
+      message_label: blast_warning
+      to_triggering_node: true
+```
 
 #### `repeat` — execute inner responses N times
 
@@ -1605,6 +1655,10 @@ contexts as `add_waypoint_flag`.
 ```yaml
 - type: destroy_waypoint
 ```
+
+> **Ordering:** if `delete_mesh_waypoint: use_triggering_waypoint: true` appears in the same
+> response list, put it **before** `destroy_waypoint`. `destroy_waypoint` deletes the DB row
+> that holds the mesh waypoint ID; running it first causes `delete_mesh_waypoint` to silently skip.
 
 ---
 
@@ -1714,23 +1768,51 @@ Only valid in `waypoint_received` events. Converts the received waypoint into a 
 After this response executes, subsequent responses in the same event have access to the
 waypoint as the triggering waypoint.
 
+The display fields (name, description, icon) can be overridden with template strings that
+support full `{token}` interpolation, including waypoint-context tokens like `{waypoint_name}`,
+`{node_shortname}`, `{date}`, and `{waypoint_icon}`.
+
 ```yaml
 - type: track_received_waypoint
   initial_flags:
-    - supply_drop         # flags applied to the waypoint unconditionally
-  placer_flag: scout      # copy this flag from the placing node to the waypoint if the node has it
-  expiry_mins: 60         # optional; defaults to the packet's expire timestamp (no expiry if 0)
+    - supply_drop           # flags applied to the waypoint unconditionally
+  placer_flag: scout        # copy this flag from the placing node to the waypoint if the node has it
+  expiry_mins: 60           # optional; defaults to the packet's expire timestamp (no expiry if 0)
+  override_name: "📍 {node_shortname}"     # optional; replaces player's name; supports {tokens}
+  override_description: "Visited {date}"   # optional; replaces player's description; supports {tokens}
+  override_icon: 129517     # optional int; omit to keep the player's icon
+  push_on_create: true      # default false; immediately re-broadcasts the waypoint to the mesh
 ```
 
 | Field | Required | Description |
 |---|---|---|
-| `initial_flags` | no | List of flag labels to add to the tracked waypoint on creation. |
+| `initial_flags` | no | List of flag labels to add to the tracked waypoint on creation. The first flag (if any) is used as the `label` in `mesh_waypoints`, enabling `force_refresh_waypoint` to find this waypoint. |
 | `placer_flag` | no | If the placing node has this flag, also add it to the waypoint — lets the waypoint inherit the placer's role. |
-| `expiry_mins` | no | Override the waypoint's lifetime. If omitted, the packet's own expire timestamp is used (converted to minutes remaining). If the packet has no expiry (expire = 0), the waypoint never expires. |
+| `expiry_mins` | no | Override the waypoint's lifetime. If omitted, the packet's own expire timestamp is used. `0` = permanent. |
+| `override_name` | no | Replace the player's waypoint name. Supports `{token}` interpolation. |
+| `override_description` | no | Replace the player's description. Supports `{token}` interpolation. |
+| `override_icon` | no | Replace the player's icon with a specific Meshtastic icon code integer. Omit to keep the player's icon. |
+| `push_on_create` | no | If `true`, immediately re-broadcasts the (possibly overridden) waypoint to the mesh using the same waypoint ID, updating it in place on all clients. Default `false`. |
 
 **Context note:** `delete_mesh_waypoint use_triggering_waypoint: true` works after
 `track_received_waypoint` because the response links the original `mesh_waypoint_id`
 from the packet to the newly created `dynamic_waypoint`.
+
+**Statue garden example:**
+```yaml
+- label: visit_stamp
+  trigger:
+    type: waypoint_received
+  trigger_per_node: true
+  responses:
+    - type: track_received_waypoint
+      initial_flags:
+        - visit_marker
+      expiry_mins: 0
+      override_name: "📍 {node_shortname}"
+      override_description: "Visited {date}"
+      push_on_create: true   # re-broadcasts with our name/desc, player's icon
+```
 
 ---
 
@@ -1793,7 +1875,6 @@ response acts on.
 | `to_all_with_flag: <label>` | flag label | All nodes that currently carry that flag | Supports `random_n` |
 | `to_all_near_waypoint: {waypoint: <label>, meters: <n>}` | object | All nodes within `meters` of the waypoint | Supports `random_n` |
 | `to_all_near_node: {node: <label>, meters: <n>}` | object | All nodes within `meters` of the named hard-coded node (excluding the target node itself) | Both nodes must have known locations; supports `random_n` |
-| `to_all_near_triggering_waypoint: {meters: <n>}` | object | All nodes within `meters` of the triggering dynamic waypoint | Only in `near_waypoint + target_flag` or `flag_expired + dynamic_waypoint` events; supports `random_n` |
 | `to_group: <label>` | group label | All current members of the named group | Supports `random_n` |
 
 **`random_n`:** Any target marked "supports `random_n`" accepts an optional
@@ -1832,6 +1913,7 @@ exceptions:
 | `target` | conditional | Required for `zone_*` and `waypoint_*` kinds, and for zone/waypoint group kinds. |
 | `chance` | conditional | Float 0.0–1.0. Required for `random_skip`. |
 | `group` | conditional | A `groups` label. Required for `*_in_group` / `*_not_in_group` kinds. |
+| `meters` | conditional | Positive number. Required for `received_waypoint_too_far` and `received_waypoint_in_range`. |
 
 | Kind | Fields | Meaning |
 |---|---|---|
@@ -1847,6 +1929,8 @@ exceptions:
 | `zone_not_in_group` | `group`, `target` (zone) | Skip if the named zone is not a member of this group |
 | `waypoint_in_group` | `group`, `target` (waypoint) | Skip if the named waypoint is a member of this group |
 | `waypoint_not_in_group` | `group`, `target` (waypoint) | Skip if the named waypoint is not a member of this group |
+| `received_waypoint_too_far` | `meters` | Skip if the received waypoint is more than `meters` from the triggering node. Only valid on `waypoint_received` triggers. |
+| `received_waypoint_in_range` | `meters` | Skip if the received waypoint is within `meters` of the triggering node. Only valid on `waypoint_received` triggers. |
 | `random_skip` | `chance` | Skip with probability `chance` (e.g. `0.3` = 30% chance of skipping) |
 
 **Evaluation order:** All flag-check and group-check exceptions are evaluated
@@ -1919,6 +2003,7 @@ conditions are violated:
 - `zone_has_flag` / `zone_lacks_flag` exceptions require `target`.
 - `waypoint_has_flag` / `waypoint_lacks_flag` without `target` are only valid in dynamic waypoint event contexts.
 - `random_skip` exceptions require `chance` (float 0.0–1.0). `flag` and `target` are not used.
+- `received_waypoint_too_far` and `received_waypoint_in_range` exceptions require `meters` (positive number) and are only valid on `waypoint_received` triggers.
 - `random_options` responses require at least 2 options, each with `weight > 0` and at least one response. All labels inside nested branches are validated the same way as top-level responses.
 - Each `nodes` entry's `initial_flags` must all reference defined flags.
 - `mutable_variables` labels must not duplicate any `variables` label.
@@ -1931,10 +2016,11 @@ conditions are violated:
 - `increment_variable` is not valid for `type: string` variables.
 - `create_waypoint` requires a trigger that provides node context.
 - `destroy_waypoint`, `add_waypoint_flag`, `remove_waypoint_flag` require a dynamic waypoint context (`near_waypoint + target_flag` or `flag_expired + target_kind: dynamic_waypoint`).
-- `to_all_near_triggering_waypoint` requires a dynamic waypoint context.
+- `with_each_nearby_waypoint` and `with_each_nearby_node` require a triggering waypoint context; `meters` must be > 0; `flag_label` (if present) must reference a defined flag; inner `responses` must be non-empty and are recursively validated.
 - `with_node` target cannot be `to_channel`.
 - `with_node` must have at least one inner response.
-- `destroy_waypoint`, `add_waypoint_flag`, `remove_waypoint_flag`, and `to_all_near_triggering_waypoint` are not valid inside `with_node`.
+- `destroy_waypoint`, `add_waypoint_flag`, and `remove_waypoint_flag` are not valid inside `with_node`.
+- If `delete_mesh_waypoint: use_triggering_waypoint: true` and `destroy_waypoint` appear together in any response list (including inside `with_each_nearby_waypoint`), `delete_mesh_waypoint` must come first — `destroy_waypoint` removes the DB row that holds the mesh ID, causing `delete_mesh_waypoint` to silently skip if it runs second.
 - `random_n` must be a positive integer when present.
 - `groups` `kind` must be `node`, `zone`, or `waypoint`. `initial_members` must reference defined labels of the matching kind.
 - Group exceptions (`*_in_group`, `*_not_in_group`) require `group`, which must reference a group of the matching kind.

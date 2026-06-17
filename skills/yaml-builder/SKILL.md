@@ -358,13 +358,14 @@ Combine with `with_node` to spawn near a specific player instead:
 
 *Blast radius / area effect:*
 ```yaml
-- type: add_flag
-  flag_label: in_blast_zone
-  to_all_near_triggering_waypoint:
-    meters: 1609
+- type: with_each_nearby_node
+  meters: 1609
+  responses:
+    - type: add_flag
+      flag_label: in_blast_zone
+      to_triggering_node: true
 ```
-Only valid in `flag_expired` + `dynamic_waypoint` or `near_waypoint` +
-`target_flag` events where `triggering_waypoint_id` is in context.
+Only valid where `triggering_waypoint_id` is in context (`flag_expired` + `dynamic_waypoint`, `near_waypoint` + `target_flag`, or `waypoint_received` after `track_received_waypoint`).
 
 *Detonation timer via flag expiry:*
 ```yaml
@@ -379,10 +380,12 @@ events:
       flag_label: armed
       target_kind: dynamic_waypoint
     responses:
-      - type: add_flag
-        flag_label: in_blast_zone
-        to_all_near_triggering_waypoint:
-          meters: 500
+      - type: with_each_nearby_node
+        meters: 500
+        responses:
+          - type: add_flag
+            flag_label: in_blast_zone
+            to_triggering_node: true
 ```
 
 *Open enrollment (any node entering a zone becomes a valid target):*
@@ -784,7 +787,8 @@ Before outputting any YAML, mentally verify:
 - [ ] `track_received_waypoint` only appears in `waypoint_received` events
 - [ ] `to_triggering_node` is not used in `time_window`, `in_zone_on_start`,
   `waypoint_expired`, or `flag_expired` with non-node `target_kind`
-- [ ] `to_all_near_triggering_waypoint` only used in dynamic waypoint context
+- [ ] `with_each_nearby_waypoint` and `with_each_nearby_node` only used where a triggering waypoint is available (`near_waypoint`, `waypoint_received` after `track_received_waypoint`, `flag_expired` with `target_kind: dynamic_waypoint`)
+- [ ] `received_waypoint_too_far` and `received_waypoint_in_range` exceptions only appear on `waypoint_received` triggers and include `meters`
 - [ ] `random_options` has at least 2 options
 - [ ] All `initial_flags` on `nodes:` entries are defined in `flags:`
 - [ ] All `initial_members` on `groups:` entries are defined and match the group's `kind`
@@ -804,6 +808,10 @@ Before outputting any YAML, mentally verify:
 - [ ] `delete_mesh_waypoint`: exactly one of `label` or `use_triggering_waypoint` is set;
   `use_triggering_waypoint: true` only valid when the triggering dynamic waypoint was created
   with `mesh_*` fields
+- [ ] **Ordering:** if `delete_mesh_waypoint: use_triggering_waypoint: true` and `destroy_waypoint`
+  both appear in the same response list (including inside `with_each_nearby_waypoint` inner responses),
+  `delete_mesh_waypoint` must come first — `destroy_waypoint` removes the DB row that holds the mesh ID,
+  so running it first causes `delete_mesh_waypoint` to silently skip
 - [ ] `send_report`: `report_label` references a defined `reports:` entry; `sort_by` variable is `scope: node`; all column `source` values are built-in tokens or `scope: node` mutable variable labels
 
 ## Reference examples

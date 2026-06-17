@@ -122,6 +122,7 @@ class CommandTrigger:
     zone_label: str | None = None
     zone_group: str | None = None   # mutually exclusive with zone_label
     channel_label: str | None = None  # required when kind == channel
+    case_sensitive: bool = True
 
 
 @dataclass
@@ -215,12 +216,6 @@ class TargetGroup:
     random_n: int | None = None
 
 
-@dataclass
-class TargetAllNearTriggeringWaypoint:
-    meters: float
-    random_n: int | None = None
-
-
 Target = (
     TargetTriggeringNode
     | TargetNode
@@ -230,7 +225,6 @@ Target = (
     | TargetAllInZone
     | TargetAllWithFlag
     | TargetAllNearWaypoint
-    | TargetAllNearTriggeringWaypoint
     | TargetAllNearNode
     | TargetChannel
     | TargetGroup
@@ -343,6 +337,20 @@ class RepeatResponse:
 
 
 @dataclass
+class WithEachNearbyWaypointResponse:
+    flag_label: str
+    meters: float
+    responses: list   # list[Response]
+
+
+@dataclass
+class WithEachNearbyNodeResponse:
+    meters: float
+    flag_label: str | None = None
+    responses: list = field(default_factory=list)
+
+
+@dataclass
 class CreateWaypointResponse:
     expiry_mins: float | None = None
     initial_flags: list[str] = field(default_factory=list)
@@ -404,6 +412,10 @@ class TrackReceivedWaypointResponse:
     initial_flags: list[str] = field(default_factory=list)
     placer_flag: str | None = None
     expiry_mins: float | None = None  # None = derive from packet expire; 0 packet = no expiry
+    override_name: str | None = None
+    override_description: str | None = None
+    override_icon: int | None = None  # None = keep player's icon
+    push_on_create: bool = False
 
 
 @dataclass
@@ -429,6 +441,8 @@ Response = (
     | RandomOptionsResponse
     | WithNodeResponse
     | RepeatResponse
+    | WithEachNearbyWaypointResponse
+    | WithEachNearbyNodeResponse
     | CreateWaypointResponse
     | AddDynamicWaypointFlagResponse
     | RemoveDynamicWaypointFlagResponse
@@ -451,11 +465,13 @@ class EventException:
                 # waypoint_has_flag | waypoint_lacks_flag | random_skip |
                 # node_in_group | node_not_in_group |
                 # zone_in_group | zone_not_in_group |
-                # waypoint_in_group | waypoint_not_in_group
+                # waypoint_in_group | waypoint_not_in_group |
+                # received_waypoint_too_far | received_waypoint_in_range
     flag: str | None = None    # required for flag-check kinds
     target: str | None = None  # zone/waypoint label; also used for zone/waypoint_in_group checks
     chance: float | None = None  # required for random_skip; 0.0–1.0
     group: str | None = None   # required for *_in_group kinds
+    meters: float | None = None  # required for received_waypoint_too_far / received_waypoint_in_range
 
 
 # ---------------------------------------------------------------------------
@@ -540,10 +556,6 @@ def _parse_target(raw: dict) -> Target:
     if "to_all_near_node" in raw:
         r = raw["to_all_near_node"]
         return TargetAllNearNode(r["node"], float(r["meters"]), random_n=raw.get("random_n"))
-    if "to_all_near_triggering_waypoint" in raw:
-        val = raw["to_all_near_triggering_waypoint"]
-        meters = float(val["meters"]) if isinstance(val, dict) else float(val)
-        return TargetAllNearTriggeringWaypoint(meters=meters, random_n=raw.get("random_n"))
     if "to_group" in raw:
         return TargetGroup(raw["to_group"], random_n=raw.get("random_n"))
     raise ConfigError(f"Unrecognised target in response: {raw}")
@@ -576,7 +588,7 @@ def _parse_response(raw: dict) -> Response:
     _TARGET_KEYS = frozenset({
         "to_triggering_node", "to_node", "to_zone", "to_channel", "to_flag",
         "to_waypoint_radius", "to_all_in_zone", "to_all_with_flag",
-        "to_all_near_waypoint", "to_all_near_triggering_waypoint", "to_all_near_node", "to_group",
+        "to_all_near_waypoint", "to_all_near_node", "to_group",
     })
     if kind == "set_variable":
         tgt = _parse_target(raw) if _TARGET_KEYS & raw.keys() else None
@@ -602,6 +614,18 @@ def _parse_response(raw: dict) -> Response:
             raise ConfigError("repeat response requires 'count'")
         return RepeatResponse(
             count=int(raw["count"]),
+            responses=[_parse_response(r) for r in raw.get("responses", [])],
+        )
+    if kind == "with_each_nearby_waypoint":
+        return WithEachNearbyWaypointResponse(
+            flag_label=raw["flag_label"],
+            meters=float(raw["meters"]),
+            responses=[_parse_response(r) for r in raw.get("responses", [])],
+        )
+    if kind == "with_each_nearby_node":
+        return WithEachNearbyNodeResponse(
+            meters=float(raw["meters"]),
+            flag_label=raw.get("flag_label"),
             responses=[_parse_response(r) for r in raw.get("responses", [])],
         )
     if kind == "create_waypoint":
@@ -654,6 +678,10 @@ def _parse_response(raw: dict) -> Response:
             initial_flags=raw.get("initial_flags", []),
             placer_flag=raw.get("placer_flag"),
             expiry_mins=float(raw["expiry_mins"]) if "expiry_mins" in raw else None,
+            override_name=raw.get("override_name"),
+            override_description=raw.get("override_description"),
+            override_icon=int(raw["override_icon"]) if raw.get("override_icon") is not None else None,
+            push_on_create=bool(raw.get("push_on_create", False)),
         )
     if kind == "send_report":
         if "report_label" not in raw:
@@ -689,6 +717,7 @@ def _parse_trigger(raw: dict):
             zone_label=raw.get("zone_label"),
             zone_group=raw.get("zone_group"),
             channel_label=raw.get("channel_label"),
+            case_sensitive=bool(raw.get("case_sensitive", True)),
         )
     if kind == "variable_threshold":
         return VariableThresholdTrigger(
@@ -720,6 +749,7 @@ def _parse_exception(raw: dict) -> EventException:
         target=raw.get("target"),
         chance=float(raw["chance"]) if "chance" in raw else None,
         group=raw.get("group"),
+        meters=float(raw["meters"]) if "meters" in raw else None,
     )
 
 
@@ -814,16 +844,26 @@ def _validate_response(
                     f"{ctx} with_node[{i}]: {type(inner).__name__} is not valid inside "
                     f"with_node (no triggering waypoint context)"
                 )
-            inner_target = getattr(inner, "target", None)
-            if isinstance(inner_target, TargetAllNearTriggeringWaypoint):
-                raise ConfigError(
-                    f"{ctx} with_node[{i}]: to_all_near_triggering_waypoint is not valid inside "
-                    f"with_node (no triggering waypoint context)"
-                )
             _validate_response(
                 inner, message_labels, flag_labels, event_labels,
                 zone_labels, waypoint_labels, node_labels, channel_labels, group_labels,
                 f"{ctx} with_node[{i}]",
+            )
+    if isinstance(resp, (WithEachNearbyWaypointResponse, WithEachNearbyNodeResponse)):
+        kind_name = "with_each_nearby_waypoint" if isinstance(resp, WithEachNearbyWaypointResponse) else "with_each_nearby_node"
+        if not resp.responses:
+            raise ConfigError(f"{ctx}: {kind_name} must have at least one inner response")
+        if resp.meters <= 0:
+            raise ConfigError(f"{ctx}: {kind_name} meters must be positive")
+        if isinstance(resp, WithEachNearbyWaypointResponse):
+            _check_label(resp.flag_label, flag_labels, f"{ctx} {kind_name} flag_label")
+        elif resp.flag_label is not None:
+            _check_label(resp.flag_label, flag_labels, f"{ctx} {kind_name} flag_label")
+        for i, inner in enumerate(resp.responses):
+            _validate_response(
+                inner, message_labels, flag_labels, event_labels,
+                zone_labels, waypoint_labels, node_labels, channel_labels, group_labels,
+                f"{ctx} {kind_name}[{i}]",
             )
 
 
@@ -857,6 +897,12 @@ def _validate_mutable_response(resp, mutable_var_def_map: dict, ctx: str) -> Non
     elif isinstance(resp, WithNodeResponse):
         for i, inner in enumerate(resp.responses):
             _validate_mutable_response(inner, mutable_var_def_map, f"{ctx} with_node[{i}]")
+    elif isinstance(resp, WithEachNearbyWaypointResponse):
+        for i, inner in enumerate(resp.responses):
+            _validate_mutable_response(inner, mutable_var_def_map, f"{ctx} with_each_nearby_waypoint[{i}]")
+    elif isinstance(resp, WithEachNearbyNodeResponse):
+        for i, inner in enumerate(resp.responses):
+            _validate_mutable_response(inner, mutable_var_def_map, f"{ctx} with_each_nearby_node[{i}]")
 
 
 def _validate(cfg: GameConfig) -> None:
@@ -1109,11 +1155,6 @@ def _validate(cfg: GameConfig) -> None:
                         f"(near_waypoint + target_flag, or flag_expired + target_kind: dynamic_waypoint)"
                     )
             target = getattr(resp, "target", None)
-            if isinstance(target, TargetAllNearTriggeringWaypoint) and not _has_dynamic_waypoint_context:
-                raise ConfigError(
-                    f"{ctx}: to_all_near_triggering_waypoint requires a dynamic waypoint context "
-                    f"(near_waypoint + target_flag, or flag_expired + target_kind: dynamic_waypoint)"
-                )
 
         for exc in event.exceptions:
             if exc.kind == "random_skip":
@@ -1141,6 +1182,13 @@ def _validate(cfg: GameConfig) -> None:
                 _check_label(exc.target, waypoint_labels, f"{ctx} exception target waypoint")
                 if group_kind.get(exc.group) != "waypoint":
                     raise ConfigError(f"{ctx} exception {exc.kind!r}: group {exc.group!r} must be kind 'waypoint'")
+            elif exc.kind in ("received_waypoint_too_far", "received_waypoint_in_range"):
+                if exc.meters is None or exc.meters <= 0:
+                    raise ConfigError(f"{ctx} exception {exc.kind!r}: 'meters' must be a positive number")
+                if not isinstance(event.trigger, WaypointReceivedTrigger):
+                    raise ConfigError(
+                        f"{ctx} exception {exc.kind!r} is only valid on 'waypoint_received' triggers"
+                    )
             else:
                 if exc.flag is None:
                     raise ConfigError(f"{ctx} exception {exc.kind!r}: 'flag' field required")
@@ -1292,9 +1340,6 @@ def _validate_target(
     elif isinstance(target, TargetGroup):
         if target.group_label not in group_labels:
             raise ConfigError(f"{ctx}: group {target.group_label!r} not defined")
-    elif isinstance(target, TargetAllNearTriggeringWaypoint):
-        if target.meters <= 0:
-            raise ConfigError(f"{ctx}: to_all_near_triggering_waypoint meters must be positive")
 
 
 # ---------------------------------------------------------------------------

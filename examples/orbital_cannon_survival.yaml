@@ -446,10 +446,12 @@ events:
         options:
           - weight: 95
             responses:
-              - type: add_flag
-                flag_label: in_blast_zone
-                to_all_near_triggering_waypoint:
-                  meters: 8047
+              - type: with_each_nearby_node
+                meters: 8047
+                responses:
+                  - type: add_flag
+                    flag_label: in_blast_zone
+                    to_triggering_node: true
               - type: random_options
                 options:
                   - weight: 1

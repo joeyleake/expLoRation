@@ -1,5 +1,5 @@
-# Zombie Minigame — No-zone zombie hunting game with leaderboard
-# Players DM !spawn to summon zombies within 200m. Kill them by walking within 20m.
+# Zombie Minigame — No-zone zombie hunting game with leaderboard and grenades.
+# Players DM 'spawn' to summon zombies within 200m. Kill them by walking within 20m.
 # 25% chance each kill spawns 2 zombie ambushers near the corpse.
 # Leaderboard tracks kills. Active players get nearby waypoints auto-refreshed.
 
@@ -12,9 +12,17 @@ flags:
     expiry_mins: 120
   - label: spawn_cooldown
     expiry_mins: 60
+  - label: has_grenade
+    expiry_mins: 60
+  - label: grenade_pin
+    expiry_mins: 5
 
 mutable_variables:
   - label: zombie_kills
+    type: integer
+    scope: node
+    initial: 0
+  - label: grenade_kills
     type: integer
     scope: node
     initial: 0
@@ -35,39 +43,55 @@ messages:
   # Commands
   # ---------------------------------------------------------------------------
   - label: spawn_cmd
-    text: "!spawn"
+    text: "spawn"
 
   - label: leaderboard_cmd
-    text: "!leaderboard"
+    text: "leaderboard"
 
   - label: help_cmd
-    text: "!help"
+    text: "help"
 
   - label: update_cmd
-    text: "!update"
+    text: "update"
 
   - label: help_msg
     text: |
-      🧟 Meshtastic Zombie Minigame
-      Walk within 20m of a zombie to kill it.
-      !spawn — summon 5 zombies near you (1hr cooldown)
-      !leaderboard — view top kill counts
-      !update — request location update
+      🧟‍♀️ Approach zombies to kill them. 
+      🧟‍♂️ Try dropping a waypoint! 💣
+      Commands:
+      spawn - summon zombies (1h cooldown)
+      leaderboard - show kill counts
+      update - refresh location
 
   - label: update_ack
     text: "📡 Requesting your location..."
 
   - label: spawn_flavor
-    text: "🧟‍♀️ The earth around you begins to shift. Rotting hands claw upward through the soil as nearby zombies drag themselves into the world. [check map]"
+    text: |
+      🧟‍♀️ Rotting hands claw upward through the soil as nearby zombies drag themselves into the world.
+      [check map]
 
   - label: ambush_flavor
     text: "⚠️ Two corpses emerge from the shadows, drawn by the sound of combat."
 
   - label: spawn_cooldown_msg
-    text: "⏳ You already raised the dead once this hour."
+    text: |
+      ⏳ Klaatu! Barada! N-ecktie? No? Hmmmm.
+      [try again later]
 
   - label: spawn_ready_msg
-    text: "🪦 The dead have returned to the earth. You are free to disturb them once more."
+    text: |
+      🪦 The dead are again at peace.
+      [feel free to disturb them again]
+
+  - label: grenade_detonation
+    text: "1, 2, 3... 💥! The Holy Hand Grenade successfully snuffed {grenade_kills} naughty zombies."
+
+  - label: grenade_out_of_range
+    text: "🤾 There's no way you've got the arm for that. Move closer. 🙄"
+
+  - label: grenade_no_ammo
+    text: "🚫 One grenade per reanimation event, no exceptions!"
 
   # ---------------------------------------------------------------------------
   # Kill messages — one chosen at random per zombie eliminated
@@ -95,12 +119,13 @@ messages:
 
 events:
   # ---------------------------------------------------------------------------
-  # !spawn — summon 5 zombies within 200m (1-hour per-node cooldown)
+  # spawn — summon 5 zombies within 200m (1-hour per-node cooldown)
   # Tags the player as 'active' for 2 hours (resets if already active)
   # ---------------------------------------------------------------------------
   - label: cmd_spawn_blocked
     trigger:
       type: dm
+      case_sensitive: false
       message_label: spawn_cmd
     trigger_per_node: true
     reset_mins: 1
@@ -115,6 +140,7 @@ events:
   - label: cmd_spawn
     trigger:
       type: dm
+      case_sensitive: false
       message_label: spawn_cmd
     trigger_per_node: true
     exceptions:
@@ -126,6 +152,9 @@ events:
         to_triggering_node: true
       - type: add_flag
         flag_label: active
+        to_triggering_node: true
+      - type: add_flag
+        flag_label: has_grenade
         to_triggering_node: true
       - type: send_message
         message_label: spawn_flavor
@@ -311,6 +340,95 @@ events:
       - type: destroy_waypoint
 
   # ---------------------------------------------------------------------------
+  # Holy Hand Grenade — player drops any waypoint while holding has_grenade to
+  # detonate it, destroying all zombies within 50m of the pin.
+  # ---------------------------------------------------------------------------
+  - label: deploy_grenade_no_ammo
+    trigger:
+      type: waypoint_received
+    trigger_per_node: true
+    reset_mins: 5
+    exceptions:
+      - kind: node_has_flag
+        flag: has_grenade
+      - kind: node_lacks_flag
+        flag: spawn_cooldown
+    responses:
+      - type: send_message
+        message_label: grenade_no_ammo
+        to_triggering_node: true
+
+  - label: deploy_grenade_out_of_range
+    trigger:
+      type: waypoint_received
+    trigger_per_node: true
+    exceptions:
+      - kind: node_lacks_flag
+        flag: has_grenade
+      - kind: received_waypoint_in_range
+        meters: 100
+    responses:
+      - type: send_message
+        message_label: grenade_out_of_range
+        to_triggering_node: true
+
+  - label: deploy_grenade
+    trigger:
+      type: waypoint_received
+    trigger_per_node: true
+    exceptions:
+      - kind: node_lacks_flag
+        flag: has_grenade
+      - kind: received_waypoint_too_far
+        meters: 100
+    responses:
+      - type: track_received_waypoint
+        initial_flags:
+          - grenade_pin
+        expiry_mins: 5
+      - type: remove_flag
+        flag_label: has_grenade
+        to_triggering_node: true
+      - type: set_variable
+        variable_label: grenade_kills
+        value: 0
+        to_triggering_node: true
+      - type: with_each_nearby_waypoint
+        flag_label: zombie
+        meters: 50
+        responses:
+          - type: delete_mesh_waypoint
+            use_triggering_waypoint: true
+          - type: destroy_waypoint
+          - type: increment_variable
+            variable_label: grenade_kills
+            amount: 1
+            to_triggering_node: true
+          - type: increment_variable
+            variable_label: zombie_kills
+            amount: 1
+            to_triggering_node: true
+      - type: with_each_nearby_waypoint
+        flag_label: zombie_ambusher
+        meters: 50
+        responses:
+          - type: delete_mesh_waypoint
+            use_triggering_waypoint: true
+          - type: destroy_waypoint
+      - type: send_message
+        message_label: grenade_detonation
+        to_triggering_node: true
+
+  - label: grenade_pin_expired
+    trigger:
+      type: flag_expired
+      flag_label: grenade_pin
+      target_kind: dynamic_waypoint
+    responses:
+      - type: delete_mesh_waypoint
+        use_triggering_waypoint: true
+
+  # ---------------------------------------------------------------------------
   # Active player proximity refresh — re-broadcast the nearest zombie within
   # 100m whenever an active player's position updates near one.
   # refresh_cooldown_mins: 2 on waypoints prevents channel flooding.
@@ -365,6 +483,7 @@ events:
   - label: cmd_leaderboard
     trigger:
       type: dm
+      case_sensitive: false
       message_label: leaderboard_cmd
     trigger_per_node: true
     reset_mins: 1
@@ -376,6 +495,7 @@ events:
   - label: cmd_help
     trigger:
       type: dm
+      case_sensitive: false
       message_label: help_cmd
     trigger_per_node: true
     reset_mins: 1
@@ -387,6 +507,7 @@ events:
   - label: cmd_update
     trigger:
       type: dm
+      case_sensitive: false
       message_label: update_cmd
     trigger_per_node: true
     reset_mins: 1
