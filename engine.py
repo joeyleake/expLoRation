@@ -17,7 +17,7 @@ import secrets
 from config import (
     GameConfig, Event, Variable, MutableVariableDef,
     ProximityTrigger, TimedTrigger, CommandTrigger, VariableThresholdTrigger,
-    FlagExpiryTrigger, WaypointExpiryTrigger, WaypointReceivedTrigger,
+    FlagExpiryTrigger, WaypointExpiryTrigger, WaypointReceivedTrigger, PositionReceivedTrigger,
     SendMessageResponse, SendAlertResponse, AddFlagResponse, RemoveFlagResponse,
     RequestLocationResponse, RequestTelemetryResponse, SetEventTriggersResponse,
     DisableEventResponse, EnableEventResponse,
@@ -334,6 +334,10 @@ class Engine:
                 if is_node_scoped:
                     if self._should_fire(event, ctx):
                         self._fire_event(event, ctx)
+        for event in self.config.events:
+            if isinstance(event.trigger, PositionReceivedTrigger):
+                if self._should_fire(event, ctx):
+                    self._fire_event(event, ctx)
 
     def handle_message(
         self, node_id: str, text: str, is_dm: bool, channel_idx: int
@@ -730,6 +734,9 @@ class Engine:
                     return False
             return True
 
+        elif isinstance(t, PositionReceivedTrigger):
+            return isinstance(ctx, NodeContext)
+
         return False
 
     @staticmethod
@@ -1026,11 +1033,25 @@ class Engine:
             var_def = self._mutable_var_defs.get(resp.variable_label)
             if var_def is None:
                 return
+            if resp.variable_amount is not None:
+                amount_var = self._get_variable(resp.variable_amount)
+                if amount_var is None:
+                    log.warning("increment_variable: variable_amount %r not found; skipping", resp.variable_amount)
+                    return
+                raw_val = self._resolve_variable(amount_var, node_id)
+                try:
+                    amount = float(raw_val)
+                except (ValueError, TypeError):
+                    log.debug("increment_variable: variable_amount %r resolved to %r; skipping",
+                              resp.variable_amount, raw_val)
+                    return
+            else:
+                amount = resp.amount
             if var_def.scope == "node":
                 for nid in self._resolve_node_targets(resp.target, node_id, wp_id):
-                    self._increment_variable(var_def, resp.amount, nid)
+                    self._increment_variable(var_def, amount, nid)
             else:
-                self._increment_variable(var_def, resp.amount)
+                self._increment_variable(var_def, amount)
 
         elif isinstance(resp, RandomOptionsResponse):
             weights = [opt.weight for opt in resp.options]
@@ -1923,6 +1944,15 @@ class Engine:
             curr_dist = geo.haversine(*curr_loc, wp.lat, wp.lon)
             prev_dist = geo.haversine(*prev_loc, wp.lat, wp.lon)
             return str(round(curr_dist - prev_dist, 1))
+
+        if var.tracks == "distance_since_last_fix":
+            if triggering_node_id is None:
+                return "[no node context]"
+            curr_loc = located.get(triggering_node_id)
+            prev_loc = self.state.get_prev_node_location(triggering_node_id)
+            if curr_loc is None or prev_loc is None:
+                return "[unknown]"  # first fix for this node — no delta yet
+            return str(round(geo.haversine(*prev_loc, *curr_loc)))
 
         if var.tracks == "distance_to_zone":
             if triggering_node_id is None:

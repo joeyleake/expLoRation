@@ -149,6 +149,11 @@ class WaypointReceivedTrigger:
     name_contains: str | None = None   # only fire if waypoint name contains this substring (case-insensitive)
 
 
+@dataclass
+class PositionReceivedTrigger:
+    pass  # fires on every GPS position packet; no fields
+
+
 # ---------------------------------------------------------------------------
 # Response targets
 # ---------------------------------------------------------------------------
@@ -309,7 +314,8 @@ class SetVariableResponse:
 @dataclass
 class IncrementVariableResponse:
     variable_label: str
-    amount: int | float
+    amount: int | float | None = None   # literal; required if variable_amount is absent
+    variable_amount: str | None = None  # computed variable label; resolved at runtime
     target: Target | None = None
 
 
@@ -595,7 +601,18 @@ def _parse_response(raw: dict) -> Response:
         return SetVariableResponse(variable_label=raw["variable_label"], value=raw["value"], target=tgt)
     if kind == "increment_variable":
         tgt = _parse_target(raw) if _TARGET_KEYS & raw.keys() else None
-        return IncrementVariableResponse(variable_label=raw["variable_label"], amount=raw["amount"], target=tgt)
+        has_amount = "amount" in raw
+        has_variable_amount = "variable_amount" in raw
+        if not has_amount and not has_variable_amount:
+            raise ConfigError("increment_variable requires 'amount' or 'variable_amount'")
+        if has_amount and has_variable_amount:
+            raise ConfigError("increment_variable: 'amount' and 'variable_amount' are mutually exclusive")
+        return IncrementVariableResponse(
+            variable_label=raw["variable_label"],
+            amount=raw.get("amount"),
+            variable_amount=raw.get("variable_amount"),
+            target=tgt,
+        )
     if kind == "random_options":
         options = []
         for opt in raw.get("options", []):
@@ -739,6 +756,8 @@ def _parse_trigger(raw: dict):
             from_flag=raw.get("from_flag"),
             name_contains=raw.get("name_contains"),
         )
+    if kind == "position_received":
+        return PositionReceivedTrigger()
     raise ConfigError(f"Unknown trigger type: {kind!r}")
 
 
@@ -1251,6 +1270,9 @@ def _validate(cfg: GameConfig) -> None:
                 raise ConfigError(f"{vctx} field 'node': must be a node label")
         elif var.tracks in ("seconds_since_last_update", "current_position", "prev_position"):
             pass  # no target required — computed from triggering node's location history
+        elif var.tracks == "distance_since_last_fix":
+            if var.scope != "node":
+                raise ConfigError(f"{vctx}: tracks: distance_since_last_fix requires scope: node")
         elif var.tracks in (
             "node_battery_level", "node_voltage", "node_channel_utilization",
             "node_air_util_tx", "node_uptime_seconds", "node_snr",
