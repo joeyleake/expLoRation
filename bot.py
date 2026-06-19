@@ -190,7 +190,8 @@ def on_receive(packet: dict, interface, engine: Engine, verbose: bool = False) -
         channel_idx = packet.get("channel", 0)
 
         tag = "DM" if is_dm else f"ch{channel_idx}"
-        print(f"[{tag}] {_node_display(node_id, interface)}: {text}", flush=True)
+        ts = datetime.now().strftime("%H:%M:%S")
+        print(f"[{ts}] [{tag}] {_node_display(node_id, interface)}: {text}", flush=True)
 
         if is_dm or channel_idx in engine.channel_index_map.values():
             log.debug("Message from %s (dm=%s ch=%d): %r", node_id, is_dm, channel_idx, text[:60])
