@@ -6,7 +6,7 @@ import pytest
 from config import (
     GameConfig, Event, Variable, Message, FlagDef, NodeDef,
     ProximityTrigger, CommandTrigger, VariableThresholdTrigger,
-    FlagExpiryTrigger, WaypointExpiryTrigger,
+    FlagExpiryTrigger, WaypointExpiryTrigger, PositionReceivedTrigger,
     SendMessageResponse, SendAlertResponse, AddFlagResponse, RemoveFlagResponse,
     RequestLocationResponse, RequestTelemetryResponse,
     SetVariableResponse, IncrementVariableResponse,
@@ -2053,7 +2053,7 @@ def _waypoint_received_config(from_flag=None, name_contains=None, response_msg="
         ],
     )
 
-def _make_wp_ctx(name="cache", from_node=NODE_ID):
+def _make_wp_ctx(name="cache", from_node=NODE_ID, icon=0):
     from engine import WaypointReceivedContext
     return WaypointReceivedContext(
         node_id=from_node,
@@ -2062,6 +2062,7 @@ def _make_wp_ctx(name="cache", from_node=NODE_ID):
         waypoint_lat=47.003,
         waypoint_lon=-122.003,
         waypoint_expire=0,
+        waypoint_icon=icon,
         mesh_waypoint_id=12345,
     )
 
@@ -3046,7 +3047,7 @@ def test_random_point_within_radius_not_always_center():
 # track_received_waypoint
 # ---------------------------------------------------------------------------
 
-def _make_track_wp_ctx(name="supply", expire=0, mesh_id=99001):
+def _make_track_wp_ctx(name="supply", expire=0, mesh_id=99001, icon=0):
     from engine import WaypointReceivedContext
     return WaypointReceivedContext(
         node_id=NODE_ID,
@@ -3055,6 +3056,7 @@ def _make_track_wp_ctx(name="supply", expire=0, mesh_id=99001):
         waypoint_lat=47.003,
         waypoint_lon=-122.003,
         waypoint_expire=expire,
+        waypoint_icon=icon,
         mesh_waypoint_id=mesh_id,
     )
 
@@ -3570,6 +3572,7 @@ def _make_wp_ctx_at(lat, lon, node_id=NODE_ID):
         waypoint_lat=lat,
         waypoint_lon=lon,
         waypoint_expire=0,
+        waypoint_icon=0,
         mesh_waypoint_id=None,
     )
 
@@ -3688,3 +3691,214 @@ def test_grenade_range_mutual_exclusion(db):
     eng.handle_waypoint_received(_make_wp_ctx_at(47.016, -122.003))
     assert not db.has_flag("node", NODE_ID, "deployed")
     assert db.has_flag("node", NODE_ID, "warned")
+
+
+# ---------------------------------------------------------------------------
+# position_received trigger
+# ---------------------------------------------------------------------------
+
+def test_position_received_fires_event(db):
+    from config import PositionReceivedTrigger
+    cfg = minimal_config(
+        events=[
+            Event(
+                label="on_pos",
+                trigger=PositionReceivedTrigger(),
+                responses=[AddFlagResponse(flag_label="active", target=TargetTriggeringNode())],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db)
+    eng.handle_position(NODE_ID, *INSIDE_ZONE)
+    assert db.has_flag("node", NODE_ID, "active")
+
+
+def test_position_received_trigger_per_node_cooldown(db):
+    from config import PositionReceivedTrigger
+    cfg = minimal_config(
+        events=[
+            Event(
+                label="on_pos",
+                trigger=PositionReceivedTrigger(),
+                trigger_per_node=True,
+                reset_mins=60,
+                responses=[AddFlagResponse(flag_label="active", target=TargetTriggeringNode())],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db)
+    eng.handle_position(NODE_ID, *INSIDE_ZONE)
+    assert db.has_flag("node", NODE_ID, "active")
+    db.remove_flag("node", NODE_ID, "active")
+
+    # Second position within cooldown — should NOT re-fire
+    eng.handle_position(NODE_ID, *OUTSIDE_ZONE)
+    assert not db.has_flag("node", NODE_ID, "active")
+
+
+def test_position_received_does_not_fire_for_waypoint_context(db):
+    from config import PositionReceivedTrigger, WaypointReceivedTrigger
+    cfg = minimal_config(
+        events=[
+            Event(
+                label="on_pos",
+                trigger=PositionReceivedTrigger(),
+                responses=[AddFlagResponse(flag_label="pos_fired", target=TargetTriggeringNode())],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db)
+    # Waypoint packet should NOT fire the position_received event
+    eng.handle_waypoint_received(_make_wp_ctx())
+    assert not db.has_flag("node", NODE_ID, "pos_fired")
+
+
+# ---------------------------------------------------------------------------
+# distance_since_last_fix variable
+# ---------------------------------------------------------------------------
+
+def test_distance_since_last_fix_unknown_on_first_fix(db):
+    from config import PositionReceivedTrigger, Variable
+    var = Variable(label="move_delta", scope="node", tracks="distance_since_last_fix")
+    cfg = minimal_config(
+        variables=[var],
+        messages=[Message(label="m", text="{move_delta}")],
+        events=[
+            Event(
+                label="on_pos",
+                trigger=PositionReceivedTrigger(),
+                responses=[SendMessageResponse(message_label="m", target=TargetTriggeringNode())],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db)
+    eng.handle_position(NODE_ID, *INSIDE_ZONE)
+    assert len(eng.sent_dms) == 1
+    assert eng.sent_dms[0][1] == "[unknown]"
+
+
+def test_distance_since_last_fix_computes_on_second_fix(db):
+    from config import PositionReceivedTrigger, Variable
+    var = Variable(label="move_delta", scope="node", tracks="distance_since_last_fix")
+    cfg = minimal_config(
+        variables=[var],
+        messages=[Message(label="m", text="{move_delta}")],
+        events=[
+            Event(
+                label="on_pos",
+                trigger=PositionReceivedTrigger(),
+                responses=[SendMessageResponse(message_label="m", target=TargetTriggeringNode())],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db)
+    # First fix — seeds prev location
+    eng.handle_position(NODE_ID, 47.0, -122.0)
+    # Second fix — ~111 m north (1 arc-second ≈ 31 m; 0.001 deg ≈ 111 m)
+    eng.handle_position(NODE_ID, 47.001, -122.0)
+    assert len(eng.sent_dms) == 2
+    delta = float(eng.sent_dms[1][1])
+    assert 100 < delta < 130   # ~111 m, allow GPS jitter tolerance
+
+
+# ---------------------------------------------------------------------------
+# variable_amount on increment_variable
+# ---------------------------------------------------------------------------
+
+def test_variable_amount_increments_by_resolved_value(db):
+    from config import PositionReceivedTrigger, Variable
+    var = Variable(label="move_delta", scope="node", tracks="distance_since_last_fix")
+    mv = MutableVariableDef(label="meters_moved", type="float", scope="node", initial=0.0)
+    cfg = minimal_config(
+        variables=[var],
+        mutable_variables=[mv],
+        events=[
+            Event(
+                label="on_pos",
+                trigger=PositionReceivedTrigger(),
+                responses=[
+                    IncrementVariableResponse(
+                        variable_label="meters_moved",
+                        variable_amount="move_delta",
+                        target=TargetTriggeringNode(),
+                    )
+                ],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db)
+    eng.handle_position(NODE_ID, 47.0, -122.0)     # first fix: [unknown] → skipped
+    eng.handle_position(NODE_ID, 47.001, -122.0)   # second fix: accumulates ~111 m
+    val = db.get_mutable_variable("meters_moved", NODE_ID)
+    assert val is not None and float(val) > 50
+
+
+def test_variable_amount_skipped_on_unknown(db):
+    from config import PositionReceivedTrigger, Variable
+    var = Variable(label="move_delta", scope="node", tracks="distance_since_last_fix")
+    mv = MutableVariableDef(label="meters_moved", type="float", scope="node", initial=0.0)
+    cfg = minimal_config(
+        variables=[var],
+        mutable_variables=[mv],
+        events=[
+            Event(
+                label="on_pos",
+                trigger=PositionReceivedTrigger(),
+                responses=[
+                    IncrementVariableResponse(
+                        variable_label="meters_moved",
+                        variable_amount="move_delta",
+                        target=TargetTriggeringNode(),
+                    )
+                ],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db)
+    eng.handle_position(NODE_ID, *INSIDE_ZONE)  # first fix — [unknown], should skip silently
+    val = db.get_mutable_variable("meters_moved", NODE_ID)
+    # Either no row yet (None) or initial value 0
+    assert val is None or float(val) == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Interpolation tokens: {date}, {time}, {waypoint_icon}
+# ---------------------------------------------------------------------------
+
+def test_waypoint_icon_token_interpolated(db):
+    from config import WaypointReceivedTrigger
+    cfg = minimal_config(
+        messages=[Message(label="m", text="icon={waypoint_icon}")],
+        events=[
+            Event(
+                label="on_wp",
+                trigger=WaypointReceivedTrigger(),
+                responses=[SendMessageResponse(message_label="m", target=TargetTriggeringNode())],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db)
+    eng.handle_waypoint_received(_make_wp_ctx(icon=42))
+    assert len(eng.sent_dms) == 1
+    assert eng.sent_dms[0][1] == "icon=42"
+
+
+def test_date_and_time_tokens_interpolated(db):
+    import re
+    from config import WaypointReceivedTrigger
+    cfg = minimal_config(
+        messages=[Message(label="m", text="d={date} t={time}")],
+        events=[
+            Event(
+                label="on_wp",
+                trigger=WaypointReceivedTrigger(),
+                responses=[SendMessageResponse(message_label="m", target=TargetTriggeringNode())],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db)
+    eng.handle_waypoint_received(_make_wp_ctx())
+    assert len(eng.sent_dms) == 1
+    text = eng.sent_dms[0][1]
+    assert re.search(r"d=\d{4}-\d{2}-\d{2}", text), f"date token not found in {text!r}"
+    assert re.search(r"t=\d{2}:\d{2}", text), f"time token not found in {text!r}"

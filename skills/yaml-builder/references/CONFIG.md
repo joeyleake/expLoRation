@@ -545,6 +545,18 @@ Supports the same optional `exclude_flag` field.
   exclude_flag: homeowner
 ```
 
+#### `distance_since_last_fix` — metres travelled since the previous GPS fix
+
+Returns the haversine distance in metres between the node's current GPS position and its
+previous GPS position. Requires `scope: node`. Resolves to `[unknown]` on a node's first fix.
+Pair with `variable_amount` on `increment_variable` to build a running odometer.
+
+```yaml
+- label: move_delta
+  scope: node
+  tracks: distance_since_last_fix
+```
+
 #### `node_battery_level` — battery percentage reported by a node
 
 Returns the most recently received battery level (0–100) from the node's telemetry.
@@ -1066,6 +1078,25 @@ trigger:
 | `zone_group` | no | A `groups` label of kind `zone` — sender must be inside any member zone. Mutually exclusive with `zone_label`. |
 | `channel_label` | yes | A `channels` label — message must arrive on this channel |
 
+#### `position_received` — any node broadcasts a GPS position
+
+Fires whenever a GPS position packet is received from any node. No zone, waypoint, or message
+anchor required — fires unconditionally for every fix. Typically used with
+`trigger_per_node: true` so each node gets its own cooldown/fire-count state.
+
+```yaml
+trigger:
+  type: position_received
+trigger_per_node: true
+```
+
+| Field | Required | Description |
+|---|---|---|
+| `type` | yes | `"position_received"` |
+
+No additional fields. All standard event options apply (`trigger_per_node`, `reset_mins`,
+`max_triggers`, `exceptions`, etc.).
+
 #### Templated commands (variable capture)
 
 A `dm` or `channel` trigger's message text may contain exactly one
@@ -1360,20 +1391,29 @@ For node-scoped variables a target is required:
 
 #### `increment_variable` — add an amount to a mutable variable
 
-Adds `amount` to the current value of a numeric mutable variable. The result is
+Adds an amount to the current value of a numeric mutable variable. The result is
 clamped to `[min, max]` if those are defined. Not valid for `type: string`.
+
+The amount can be a literal number (`amount`) or resolved at runtime from a computed variable
+(`variable_amount`). Exactly one must be provided.
 
 ```yaml
 - type: increment_variable
   variable_label: hint_count
   amount: 1
   to_triggering_node: true   # required for scope: node
+
+- type: increment_variable
+  variable_label: meters_moved
+  variable_amount: move_delta   # resolved from a computed variable at runtime
+  to_triggering_node: true
 ```
 
 | Field | Required | Description |
 |---|---|---|
 | `variable_label` | yes | A `mutable_variables` label with `type: integer` or `float` |
-| `amount` | yes | Amount to add (positive or negative) |
+| `amount` | cond. | Amount to add (positive or negative). Mutually exclusive with `variable_amount` |
+| `variable_amount` | cond. | Label of a computed `variables:` entry. Its resolved value is used as the increment. Silently skipped if it resolves to a non-numeric value (e.g. `[unknown]` on a node's first GPS fix) |
 | target key | conditional | Required when `scope: node`. Must not be present for `scope: global`. |
 
 #### `disable_event` — disable an event at runtime

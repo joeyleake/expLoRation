@@ -422,6 +422,19 @@ Supports the same optional `exclude_flag` field.
   exclude_flag: homeowner
 ```
 
+#### `distance_since_last_fix` — metres travelled since the previous GPS fix
+
+Returns the haversine distance in metres between the node's current GPS position and its
+previous GPS position. Requires `scope: node`. Resolves to `[unknown]` on a node's first fix
+(no previous position exists yet). Use `variable_amount` on `increment_variable` to accumulate
+this into a running odometer.
+
+```yaml
+- label: move_delta
+  scope: node
+  tracks: distance_since_last_fix
+```
+
 ---
 
 ## Mutable Variables
@@ -502,6 +515,9 @@ responses:
 Adds an amount to a numeric mutable variable (use a negative amount to decrement). The result
 is clamped to `[min, max]` if bounds are defined. Not valid for `type: string`.
 
+The increment amount can be a literal number (`amount`) or resolved at runtime from a computed
+variable (`variable_amount`). Exactly one must be provided.
+
 ```yaml
 responses:
   - type: increment_variable
@@ -512,12 +528,18 @@ responses:
     variable_label: hp
     amount: -25
     to_triggering_node: true  # node-scoped: target required
+
+  - type: increment_variable
+    variable_label: meters_moved
+    variable_amount: move_delta   # resolves a computed variable at runtime
+    to_triggering_node: true
 ```
 
 | Field | Required | Description |
 |---|---|---|
 | `variable_label` | yes | Label of a numeric (`integer` or `float`) `mutable_variables:` entry |
-| `amount` | yes | Number to add (positive or negative) |
+| `amount` | cond. | Number to add (positive or negative). Mutually exclusive with `variable_amount` |
+| `variable_amount` | cond. | Label of a computed `variables:` entry whose resolved value is used as the increment amount. Silently skipped if the variable resolves to a non-numeric value (e.g. `[unknown]` on a node's first GPS fix) |
 | target | node-scoped only | Any node-resolving target. Must be omitted for `scope: global` |
 
 ### Triggering on a value: `variable_threshold`
@@ -974,6 +996,25 @@ trigger:
 | `message_label` | yes | A `messages` label |
 | `zone_label` | no | A `zones` label — if set, sender must be inside this zone |
 | `channel_label` | yes | A `channels` label — message must arrive on this channel |
+
+#### `position_received` — any node broadcasts a GPS position
+
+Fires whenever a GPS position packet is received from any node. No zone, waypoint, or
+message anchor required — fires unconditionally for every fix. Typically used with
+`trigger_per_node: true` so each node gets its own cooldown/fire-count state.
+
+```yaml
+trigger:
+  type: position_received
+trigger_per_node: true
+```
+
+| Field | Required | Description |
+|---|---|---|
+| `type` | yes | `"position_received"` |
+
+No additional fields. All standard event options (`trigger_per_node`, `reset_mins`,
+`max_triggers`, `exceptions`, etc.) apply normally.
 
 ---
 

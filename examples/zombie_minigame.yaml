@@ -81,8 +81,8 @@ messages:
 
   - label: spawn_ready_msg
     text: |
-      🪦 The dead are again at peace.
-      [feel free to disturb them again]
+      🪦 The dead are at peace once more.
+      [feel free to disturb them again!]
 
   - label: grenade_detonation
     text: "1, 2, 3... 💥! The Holy Hand Grenade successfully snuffed {grenade_kills} naughty zombies."
