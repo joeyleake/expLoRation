@@ -358,13 +358,14 @@ Combine with `with_node` to spawn near a specific player instead:
 
 *Blast radius / area effect:*
 ```yaml
-- type: add_flag
-  flag_label: in_blast_zone
-  to_all_near_triggering_waypoint:
-    meters: 1609
+- type: with_each_nearby_node
+  meters: 1609
+  responses:
+    - type: add_flag
+      flag_label: in_blast_zone
+      to_triggering_node: true
 ```
-Only valid in `flag_expired` + `dynamic_waypoint` or `near_waypoint` +
-`target_flag` events where `triggering_waypoint_id` is in context.
+Only valid where `triggering_waypoint_id` is in context (`flag_expired` + `dynamic_waypoint`, `near_waypoint` + `target_flag`, or `waypoint_received` after `track_received_waypoint`).
 
 *Detonation timer via flag expiry:*
 ```yaml
@@ -379,10 +380,12 @@ events:
       flag_label: armed
       target_kind: dynamic_waypoint
     responses:
-      - type: add_flag
-        flag_label: in_blast_zone
-        to_all_near_triggering_waypoint:
-          meters: 500
+      - type: with_each_nearby_node
+        meters: 500
+        responses:
+          - type: add_flag
+            flag_label: in_blast_zone
+            to_triggering_node: true
 ```
 
 *Open enrollment (any node entering a zone becomes a valid target):*
@@ -702,6 +705,52 @@ events:
 `scout` flag, the waypoint also gets tagged `scout`, so later triggers can distinguish
 waypoints by who dropped them.
 
+**`position_received` trigger** — fires on every GPS position packet from any node. Use with
+`trigger_per_node: true` so each node tracks its own state independently.
+
+```yaml
+variables:
+  - label: move_delta
+    scope: node
+    tracks: distance_since_last_fix   # metres since last fix; [unknown] on first fix
+
+mutable_variables:
+  - label: meters_moved
+    type: float
+    scope: node
+    initial: 0
+    min: 0
+  - label: move_count
+    type: integer
+    scope: node
+    initial: 0
+    min: 0
+
+events:
+  - label: track_movement
+    trigger:
+      type: position_received
+    trigger_per_node: true
+    responses:
+      - type: increment_variable
+        variable_label: move_count
+        amount: 1
+        to_triggering_node: true
+      - type: increment_variable
+        variable_label: meters_moved
+        variable_amount: move_delta   # resolved from computed variable at runtime
+        to_triggering_node: true      # silently skipped if [unknown] (first fix)
+```
+
+**`distance_since_last_fix` variable track** — computes haversine distance (metres) between
+a node's current and previous GPS fix. Requires `scope: node`. Resolves to `[unknown]` on a
+node's first fix. Designed to be used with `variable_amount` on `increment_variable` to build
+a running odometer.
+
+**`variable_amount` on `increment_variable`** — alternative to `amount` that resolves a
+computed variable label at runtime. Exactly one of `amount` or `variable_amount` must be set.
+Silently skipped when the variable resolves to a non-numeric string.
+
 **Leaderboards and reports:**
 Define a `reports:` entry and dispatch it with `send_report`. Rows are per-node,
 ranked by a mutable variable. Text columns left-align, numeric columns right-align.
@@ -784,11 +833,15 @@ Before outputting any YAML, mentally verify:
 - [ ] `track_received_waypoint` only appears in `waypoint_received` events
 - [ ] `to_triggering_node` is not used in `time_window`, `in_zone_on_start`,
   `waypoint_expired`, or `flag_expired` with non-node `target_kind`
-- [ ] `to_all_near_triggering_waypoint` only used in dynamic waypoint context
+- [ ] `with_each_nearby_waypoint` and `with_each_nearby_node` only used where a triggering waypoint is available (`near_waypoint`, `waypoint_received` after `track_received_waypoint`, `flag_expired` with `target_kind: dynamic_waypoint`)
+- [ ] `received_waypoint_too_far` and `received_waypoint_in_range` exceptions only appear on `waypoint_received` triggers and include `meters`
 - [ ] `random_options` has at least 2 options
 - [ ] All `initial_flags` on `nodes:` entries are defined in `flags:`
 - [ ] All `initial_members` on `groups:` entries are defined and match the group's `kind`
 - [ ] `mutable_variables` used in `increment_variable` are type `integer` or `float`
+- [ ] `increment_variable` has exactly one of `amount` (literal number) or `variable_amount` (computed variable label); not both, not neither
+- [ ] `variable_amount` references a `variables:` label (not a `mutable_variables:` label)
+- [ ] `distance_since_last_fix` variables are `scope: node`
 - [ ] `set_variable`/`increment_variable` on `scope: node` variables have a target; `scope: global` have no target
 - [ ] `variable_threshold` `operator` is one of: `lt`, `lte`, `eq`, `neq`, `gte`, `gt`
 - [ ] `flag_expired` has `target_kind`; `waypoint_expired` does not require it
@@ -804,6 +857,10 @@ Before outputting any YAML, mentally verify:
 - [ ] `delete_mesh_waypoint`: exactly one of `label` or `use_triggering_waypoint` is set;
   `use_triggering_waypoint: true` only valid when the triggering dynamic waypoint was created
   with `mesh_*` fields
+- [ ] **Ordering:** if `delete_mesh_waypoint: use_triggering_waypoint: true` and `destroy_waypoint`
+  both appear in the same response list (including inside `with_each_nearby_waypoint` inner responses),
+  `delete_mesh_waypoint` must come first — `destroy_waypoint` removes the DB row that holds the mesh ID,
+  so running it first causes `delete_mesh_waypoint` to silently skip
 - [ ] `send_report`: `report_label` references a defined `reports:` entry; `sort_by` variable is `scope: node`; all column `source` values are built-in tokens or `scope: node` mutable variable labels
 
 ## Reference examples

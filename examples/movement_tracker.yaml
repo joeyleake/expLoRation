@@ -1,0 +1,129 @@
+# Movement Tracker — passive per-node odometer, no zones, no comms.
+# Every GPS position update increments move counts and distance totals across
+# two windows: all-time and last 24 hours.
+# DM 'leaderboard' to see the top 5 nodes by all-time distance.
+#
+# Note: the 24h window resets on a rolling interval from bot startup, not
+# at calendar midnight.
+
+flags:
+  - label: tracked
+    expiry_mins: 10080    # 7 days — re-stamped on every position update
+
+mutable_variables:
+  - label: move_count
+    type: integer
+    scope: node
+    initial: 0
+    min: 0
+  - label: meters_moved
+    type: float
+    scope: node
+    initial: 0
+    min: 0
+
+  - label: move_count_24h
+    type: integer
+    scope: node
+    initial: 0
+    min: 0
+  - label: meters_moved_24h
+    type: float
+    scope: node
+    initial: 0
+    min: 0
+
+variables:
+  - label: move_delta
+    scope: node
+    tracks: distance_since_last_fix   # metres between previous and current GPS fix;
+                                      # resolves to [unknown] on a node's first fix
+
+messages:
+  - label: leaderboard_cmd
+    text: "leaderboard"
+
+reports:
+  - label: movement_board
+    sort_by: meters_moved
+    sort_order: desc
+    rows: 5
+    columns:
+      - source: node_id
+        header: ID
+      - source: node_shortname
+        header: NAME
+      - source: move_count
+        header: MOVES
+      - source: meters_moved
+        header: DIST(m)
+      - source: move_count_24h
+        header: #_1d
+      - source: meters_moved_24h
+        header: D_1d
+
+events:
+  # ---------------------------------------------------------------------------
+  # Track movement — fires on every GPS packet from any node.
+  # Stamps the 'tracked' flag so reset events can target all known nodes.
+  # Distance increments are skipped silently on a node's first fix (no delta).
+  # ---------------------------------------------------------------------------
+  - label: track_movement
+    trigger:
+      type: position_received
+    trigger_per_node: true
+    responses:
+      - type: add_flag
+        flag_label: tracked
+        to_triggering_node: true
+      - type: increment_variable
+        variable_label: move_count
+        amount: 1
+        to_triggering_node: true
+      - type: increment_variable
+        variable_label: meters_moved
+        variable_amount: move_delta
+        to_triggering_node: true
+      - type: increment_variable
+        variable_label: move_count_24h
+        amount: 1
+        to_triggering_node: true
+      - type: increment_variable
+        variable_label: meters_moved_24h
+        variable_amount: move_delta
+        to_triggering_node: true
+
+  # ---------------------------------------------------------------------------
+  # Daily reset — zeroes 24h counters for all tracked nodes every 24 hours.
+  # ---------------------------------------------------------------------------
+  - label: reset_daily
+    trigger:
+      type: time_window
+      start: "2020-01-01T00:00:00"
+      end:   "2099-01-01T00:00:00"
+    auto_recur: true
+    recur_mins: 1440
+    responses:
+      - type: set_variable
+        variable_label: move_count_24h
+        value: 0
+        to_all_with_flag: tracked
+      - type: set_variable
+        variable_label: meters_moved_24h
+        value: 0
+        to_all_with_flag: tracked
+
+  # ---------------------------------------------------------------------------
+  # Leaderboard — DM 'leaderboard' to receive the top-5 report.
+  # ---------------------------------------------------------------------------
+  - label: cmd_leaderboard
+    trigger:
+      type: dm
+      case_sensitive: false
+      message_label: leaderboard_cmd
+    trigger_per_node: true
+    reset_mins: 1
+    responses:
+      - type: send_report
+        report_label: movement_board
+        to_triggering_node: true

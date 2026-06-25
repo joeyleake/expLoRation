@@ -400,7 +400,7 @@ events: []
 
 def test_create_waypoint_without_node_context_raises(tmp_yaml):
     """create_waypoint is invalid inside a timed trigger (no node context)."""
-    with pytest.raises(ConfigError, match="create_waypoint requires"):
+    with pytest.raises(ConfigError, match="create_waypoint without randomly_in_zone requires"):
         load_config(tmp_yaml(valid_yaml(ZONE_YAML, FLAG_YAML, """\
 events:
   - label: ev
@@ -412,3 +412,87 @@ events:
       - type: create_waypoint
         expiry_mins: 60
 """)))
+
+
+def test_position_received_trigger_parses(tmp_yaml):
+    cfg = load_config(tmp_yaml(valid_yaml(FLAG_YAML, MESSAGE_YAML, """\
+events:
+  - label: on_pos
+    trigger:
+      type: position_received
+    trigger_per_node: true
+    responses: []
+""")))
+    from config import PositionReceivedTrigger
+    assert isinstance(cfg.events[0].trigger, PositionReceivedTrigger)
+
+
+def test_increment_variable_variable_amount_parses(tmp_yaml):
+    cfg = load_config(tmp_yaml(valid_yaml(FLAG_YAML, MESSAGE_YAML, """\
+mutable_variables:
+  - label: dist_total
+    type: float
+    scope: node
+    initial: 0
+
+variables:
+  - label: move_delta
+    scope: node
+    tracks: distance_since_last_fix
+
+events:
+  - label: track
+    trigger:
+      type: position_received
+    trigger_per_node: true
+    responses:
+      - type: increment_variable
+        variable_label: dist_total
+        variable_amount: move_delta
+        to_triggering_node: true
+""")))
+    from config import IncrementVariableResponse
+    resp = cfg.events[0].responses[0]
+    assert isinstance(resp, IncrementVariableResponse)
+    assert resp.variable_amount == "move_delta"
+    assert resp.amount is None
+
+
+def test_increment_variable_requires_amount_or_variable_amount(tmp_yaml):
+    with pytest.raises(ConfigError, match="amount"):
+        load_config(tmp_yaml(valid_yaml(FLAG_YAML, MESSAGE_YAML, """\
+mutable_variables:
+  - label: score
+    type: integer
+    scope: global
+    initial: 0
+
+events:
+  - label: ev
+    trigger:
+      type: time_window
+      start: "2020-01-01T00:00:00"
+      end: "2099-01-01T00:00:00"
+    responses:
+      - type: increment_variable
+        variable_label: score
+""")))
+
+
+def test_distance_since_last_fix_requires_node_scope(tmp_yaml):
+    with pytest.raises(ConfigError, match="scope: node"):
+        load_config(tmp_yaml(valid_yaml(FLAG_YAML, MESSAGE_YAML, """\
+variables:
+  - label: move_delta
+    scope: global
+    tracks: distance_since_last_fix
+
+events:
+  - label: ev
+    trigger:
+      type: time_window
+      start: "2020-01-01T00:00:00"
+      end: "2099-01-01T00:00:00"
+    responses: []
+""")))
+

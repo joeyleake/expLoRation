@@ -6,7 +6,7 @@ import pytest
 from config import (
     GameConfig, Event, Variable, Message, FlagDef, NodeDef,
     ProximityTrigger, CommandTrigger, VariableThresholdTrigger,
-    FlagExpiryTrigger, WaypointExpiryTrigger,
+    FlagExpiryTrigger, WaypointExpiryTrigger, PositionReceivedTrigger,
     SendMessageResponse, SendAlertResponse, AddFlagResponse, RemoveFlagResponse,
     RequestLocationResponse, RequestTelemetryResponse,
     SetVariableResponse, IncrementVariableResponse,
@@ -176,6 +176,43 @@ def test_command_dm_trigger_fires(db):
     eng = make_engine(cfg, db)
     eng.handle_message(NODE_ID, "hello", is_dm=True, channel_idx=0)
     assert db.has_flag("node", NODE_ID, "active")
+
+
+def test_command_dm_trigger_case_insensitive_fires(db):
+    from config import Message
+    cfg = minimal_config(
+        messages=[Message(label="spawn", text="spawn")],
+        events=[
+            Event(
+                label="spawn_ev",
+                trigger=CommandTrigger(kind="dm", message_label="spawn", case_sensitive=False),
+                responses=[AddFlagResponse(flag_label="active", target=TargetTriggeringNode())],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db)
+    eng.handle_message(NODE_ID, "SPAWN", is_dm=True, channel_idx=0)
+    assert db.has_flag("node", NODE_ID, "active")
+    db.remove_flag("node", NODE_ID, "active")
+    eng.handle_message(NODE_ID, "Spawn", is_dm=True, channel_idx=0)
+    assert db.has_flag("node", NODE_ID, "active")
+
+
+def test_command_dm_trigger_case_sensitive_no_fire(db):
+    from config import Message
+    cfg = minimal_config(
+        messages=[Message(label="spawn", text="spawn")],
+        events=[
+            Event(
+                label="spawn_ev",
+                trigger=CommandTrigger(kind="dm", message_label="spawn", case_sensitive=True),
+                responses=[AddFlagResponse(flag_label="active", target=TargetTriggeringNode())],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db)
+    eng.handle_message(NODE_ID, "SPAWN", is_dm=True, channel_idx=0)
+    assert not db.has_flag("node", NODE_ID, "active")
 
 
 def test_command_dm_trigger_wrong_text_no_fire(db):
@@ -2016,7 +2053,7 @@ def _waypoint_received_config(from_flag=None, name_contains=None, response_msg="
         ],
     )
 
-def _make_wp_ctx(name="cache", from_node=NODE_ID):
+def _make_wp_ctx(name="cache", from_node=NODE_ID, icon=0):
     from engine import WaypointReceivedContext
     return WaypointReceivedContext(
         node_id=from_node,
@@ -2025,6 +2062,7 @@ def _make_wp_ctx(name="cache", from_node=NODE_ID):
         waypoint_lat=47.003,
         waypoint_lon=-122.003,
         waypoint_expire=0,
+        waypoint_icon=icon,
         mesh_waypoint_id=12345,
     )
 
@@ -3009,7 +3047,7 @@ def test_random_point_within_radius_not_always_center():
 # track_received_waypoint
 # ---------------------------------------------------------------------------
 
-def _make_track_wp_ctx(name="supply", expire=0, mesh_id=99001):
+def _make_track_wp_ctx(name="supply", expire=0, mesh_id=99001, icon=0):
     from engine import WaypointReceivedContext
     return WaypointReceivedContext(
         node_id=NODE_ID,
@@ -3018,6 +3056,7 @@ def _make_track_wp_ctx(name="supply", expire=0, mesh_id=99001):
         waypoint_lat=47.003,
         waypoint_lon=-122.003,
         waypoint_expire=expire,
+        waypoint_icon=icon,
         mesh_waypoint_id=mesh_id,
     )
 
@@ -3293,3 +3332,573 @@ def test_send_report_aligned_numeric_right_justified(db):
     parts_2 = lines[1].split()
     # The last token on each row is the kill count — right-aligned means same field width
     assert len(lines[0].rstrip()) == len(lines[1].rstrip()) or "10" in lines[0]
+
+
+# ---------------------------------------------------------------------------
+# with_each_nearby_waypoint
+# ---------------------------------------------------------------------------
+
+def test_with_each_nearby_waypoint_destroys_flagged_waypoints_in_radius(db):
+    from config import (
+        WaypointReceivedTrigger, TrackReceivedWaypointResponse,
+        WithEachNearbyWaypointResponse, DestroyWaypointResponse,
+    )
+    cfg = minimal_config(
+        flags=[FlagDef(label="grenade_pin"), FlagDef(label="zombie")],
+        events=[
+            Event(
+                label="deploy",
+                trigger=WaypointReceivedTrigger(),
+                responses=[
+                    TrackReceivedWaypointResponse(initial_flags=["grenade_pin"]),
+                    WithEachNearbyWaypointResponse(
+                        flag_label="zombie",
+                        meters=50,
+                        responses=[DestroyWaypointResponse()],
+                    ),
+                ],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db)
+    # Place two zombies: one within 50m, one far away
+    near_wp = db.create_dynamic_waypoint(47.003, -122.003)
+    db.add_dynamic_waypoint_flag(near_wp, "zombie")
+    far_wp = db.create_dynamic_waypoint(48.000, -123.000)
+    db.add_dynamic_waypoint_flag(far_wp, "zombie")
+
+    ctx = _make_track_wp_ctx()
+    ctx.waypoint_lat, ctx.waypoint_lon = 47.003, -122.003
+    eng.handle_waypoint_received(ctx)
+
+    rows = _get_all_dynamic_waypoints(db)
+    remaining_ids = [r[0] for r in rows]
+    assert near_wp not in remaining_ids
+    assert far_wp in remaining_ids
+
+
+def test_with_each_nearby_waypoint_empty_radius_does_nothing(db):
+    from config import (
+        WaypointReceivedTrigger, TrackReceivedWaypointResponse,
+        WithEachNearbyWaypointResponse, DestroyWaypointResponse,
+    )
+    cfg = minimal_config(
+        flags=[FlagDef(label="grenade_pin"), FlagDef(label="zombie")],
+        events=[
+            Event(
+                label="deploy",
+                trigger=WaypointReceivedTrigger(),
+                responses=[
+                    TrackReceivedWaypointResponse(initial_flags=["grenade_pin"]),
+                    WithEachNearbyWaypointResponse(
+                        flag_label="zombie",
+                        meters=50,
+                        responses=[DestroyWaypointResponse()],
+                    ),
+                ],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db)
+    # Place zombie far from the grenade drop point
+    far_wp = db.create_dynamic_waypoint(48.000, -123.000)
+    db.add_dynamic_waypoint_flag(far_wp, "zombie")
+
+    ctx = _make_track_wp_ctx()
+    ctx.waypoint_lat, ctx.waypoint_lon = 47.003, -122.003
+    eng.handle_waypoint_received(ctx)
+
+    rows = _get_all_dynamic_waypoints(db)
+    remaining_ids = [r[0] for r in rows]
+    assert far_wp in remaining_ids
+
+
+def test_with_each_nearby_waypoint_inner_responses_use_each_waypoint_context(db):
+    from config import (
+        WaypointReceivedTrigger, TrackReceivedWaypointResponse,
+        WithEachNearbyWaypointResponse, IncrementVariableResponse,
+    )
+    cfg = minimal_config(
+        flags=[FlagDef(label="grenade_pin"), FlagDef(label="zombie")],
+        mutable_variables=[MutableVariableDef(label="kills", type="integer", scope="node", initial=0)],
+        events=[
+            Event(
+                label="deploy",
+                trigger=WaypointReceivedTrigger(),
+                responses=[
+                    TrackReceivedWaypointResponse(initial_flags=["grenade_pin"]),
+                    WithEachNearbyWaypointResponse(
+                        flag_label="zombie",
+                        meters=100,
+                        responses=[
+                            IncrementVariableResponse(
+                                variable_label="kills",
+                                amount=1,
+                                target=TargetTriggeringNode(),
+                            ),
+                        ],
+                    ),
+                ],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db)
+    for _ in range(3):
+        wp = db.create_dynamic_waypoint(47.003, -122.003)
+        db.add_dynamic_waypoint_flag(wp, "zombie")
+
+    ctx = _make_track_wp_ctx()
+    ctx.waypoint_lat, ctx.waypoint_lon = 47.003, -122.003
+    eng.handle_waypoint_received(ctx)
+
+    assert db.get_mutable_variable("kills", NODE_ID) == 3
+
+
+def test_with_each_nearby_waypoint_no_triggering_waypoint_skips(db):
+    from config import (
+        WaypointReceivedTrigger,
+        WithEachNearbyWaypointResponse, DestroyWaypointResponse,
+    )
+    cfg = minimal_config(
+        flags=[FlagDef(label="zombie")],
+        events=[
+            Event(
+                label="deploy",
+                trigger=WaypointReceivedTrigger(),
+                responses=[
+                    WithEachNearbyWaypointResponse(
+                        flag_label="zombie",
+                        meters=50,
+                        responses=[DestroyWaypointResponse()],
+                    ),
+                ],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db)
+    wp = db.create_dynamic_waypoint(47.003, -122.003)
+    db.add_dynamic_waypoint_flag(wp, "zombie")
+
+    ctx = _make_track_wp_ctx()
+    ctx.waypoint_lat, ctx.waypoint_lon = 47.003, -122.003
+    eng.handle_waypoint_received(ctx)
+
+    # No track_received_waypoint → no triggering_waypoint_id → waypoint survives
+    rows = _get_all_dynamic_waypoints(db)
+    assert any(r[0] == wp for r in rows)
+
+
+# ---------------------------------------------------------------------------
+# with_each_nearby_node
+# ---------------------------------------------------------------------------
+
+def test_with_each_nearby_node_applies_responses_to_nodes_in_radius(db):
+    from config import (
+        ProximityTrigger, WithEachNearbyNodeResponse,
+    )
+    cfg = minimal_config(
+        flags=[FlagDef(label="active"), FlagDef(label="blast_zone")],
+        events=[
+            Event(
+                label="explode",
+                trigger=ProximityTrigger(kind="near_waypoint", target_flag="active", meters=500),
+                responses=[
+                    WithEachNearbyNodeResponse(
+                        meters=200,
+                        responses=[AddFlagResponse(flag_label="blast_zone", target=TargetTriggeringNode())],
+                    ),
+                ],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db)
+    # Place two nodes: one within 200m of the waypoint (INSIDE_ZONE), one far
+    db.update_node_location(NODE_ID, *INSIDE_ZONE)
+    db.update_node_location(NODE2_ID, 48.000, -123.000)
+    # Create a dynamic waypoint at INSIDE_ZONE with flag "active"
+    wp = db.create_dynamic_waypoint(*INSIDE_ZONE)
+    db.add_dynamic_waypoint_flag(wp, "active")
+
+    eng.handle_position(NODE_ID, *INSIDE_ZONE)
+
+    assert db.has_flag("node", NODE_ID, "blast_zone")
+    assert not db.has_flag("node", NODE2_ID, "blast_zone")
+
+
+def test_with_each_nearby_node_flag_filter_limits_targets(db):
+    from config import (
+        ProximityTrigger, WithEachNearbyNodeResponse,
+    )
+    cfg = minimal_config(
+        flags=[FlagDef(label="active"), FlagDef(label="player"), FlagDef(label="tagged")],
+        events=[
+            Event(
+                label="tag_players",
+                trigger=ProximityTrigger(kind="near_waypoint", target_flag="active", meters=500),
+                responses=[
+                    WithEachNearbyNodeResponse(
+                        meters=500,
+                        flag_label="player",
+                        responses=[AddFlagResponse(flag_label="tagged", target=TargetTriggeringNode())],
+                    ),
+                ],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db)
+    db.update_node_location(NODE_ID, *INSIDE_ZONE)
+    db.update_node_location(NODE2_ID, *INSIDE_ZONE)
+    db.add_flag("node", NODE_ID, "player")
+    # NODE2_ID does NOT have player flag
+    wp = db.create_dynamic_waypoint(*INSIDE_ZONE)
+    db.add_dynamic_waypoint_flag(wp, "active")
+
+    eng.handle_position(NODE_ID, *INSIDE_ZONE)
+
+    assert db.has_flag("node", NODE_ID, "tagged")
+    assert not db.has_flag("node", NODE2_ID, "tagged")
+
+
+# ---------------------------------------------------------------------------
+# received_waypoint_too_far / received_waypoint_in_range exceptions
+# ---------------------------------------------------------------------------
+
+def _make_wp_ctx_at(lat, lon, node_id=NODE_ID):
+    from engine import WaypointReceivedContext
+    return WaypointReceivedContext(
+        node_id=node_id,
+        waypoint_name="pin",
+        waypoint_description="",
+        waypoint_lat=lat,
+        waypoint_lon=lon,
+        waypoint_expire=0,
+        waypoint_icon=0,
+        mesh_waypoint_id=None,
+    )
+
+
+def test_received_waypoint_too_far_blocks_when_out_of_range(db):
+    from config import WaypointReceivedTrigger, AddFlagResponse
+    cfg = minimal_config(
+        flags=[FlagDef(label="deployed")],
+        events=[
+            Event(
+                label="deploy",
+                trigger=WaypointReceivedTrigger(),
+                exceptions=[EventException(kind="received_waypoint_too_far", meters=100)],
+                responses=[AddFlagResponse(flag_label="deployed", target=TargetTriggeringNode())],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db)
+    db.update_node_location(NODE_ID, *INSIDE_ZONE)
+    # Drop pin ~1.5km away — far beyond 100m limit
+    eng.handle_waypoint_received(_make_wp_ctx_at(47.016, -122.003))
+    assert not db.has_flag("node", NODE_ID, "deployed")
+
+
+def test_received_waypoint_too_far_fires_when_in_range(db):
+    from config import WaypointReceivedTrigger, AddFlagResponse
+    cfg = minimal_config(
+        flags=[FlagDef(label="deployed")],
+        events=[
+            Event(
+                label="deploy",
+                trigger=WaypointReceivedTrigger(),
+                exceptions=[EventException(kind="received_waypoint_too_far", meters=100)],
+                responses=[AddFlagResponse(flag_label="deployed", target=TargetTriggeringNode())],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db)
+    db.update_node_location(NODE_ID, *INSIDE_ZONE)
+    # Drop pin ~50m away — within 100m limit
+    eng.handle_waypoint_received(_make_wp_ctx_at(47.0035, -122.003))
+    assert db.has_flag("node", NODE_ID, "deployed")
+
+
+def test_received_waypoint_in_range_blocks_when_in_range(db):
+    from config import WaypointReceivedTrigger, AddFlagResponse
+    cfg = minimal_config(
+        flags=[FlagDef(label="warned")],
+        events=[
+            Event(
+                label="warn",
+                trigger=WaypointReceivedTrigger(),
+                exceptions=[EventException(kind="received_waypoint_in_range", meters=100)],
+                responses=[AddFlagResponse(flag_label="warned", target=TargetTriggeringNode())],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db)
+    db.update_node_location(NODE_ID, *INSIDE_ZONE)
+    # Drop pin ~50m away — within range, so this "out of range warning" event is blocked
+    eng.handle_waypoint_received(_make_wp_ctx_at(47.0035, -122.003))
+    assert not db.has_flag("node", NODE_ID, "warned")
+
+
+def test_received_waypoint_in_range_fires_when_out_of_range(db):
+    from config import WaypointReceivedTrigger, AddFlagResponse
+    cfg = minimal_config(
+        flags=[FlagDef(label="warned")],
+        events=[
+            Event(
+                label="warn",
+                trigger=WaypointReceivedTrigger(),
+                exceptions=[EventException(kind="received_waypoint_in_range", meters=100)],
+                responses=[AddFlagResponse(flag_label="warned", target=TargetTriggeringNode())],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db)
+    db.update_node_location(NODE_ID, *INSIDE_ZONE)
+    # Drop pin ~1.5km away — out of range, so warning event fires
+    eng.handle_waypoint_received(_make_wp_ctx_at(47.016, -122.003))
+    assert db.has_flag("node", NODE_ID, "warned")
+
+
+def test_grenade_range_mutual_exclusion(db):
+    """Both exception kinds together route deploy vs. warn events correctly."""
+    from config import WaypointReceivedTrigger, AddFlagResponse
+    cfg = minimal_config(
+        flags=[FlagDef(label="deployed"), FlagDef(label="warned")],
+        events=[
+            Event(
+                label="warn_out_of_range",
+                trigger=WaypointReceivedTrigger(),
+                exceptions=[EventException(kind="received_waypoint_in_range", meters=100)],
+                responses=[AddFlagResponse(flag_label="warned", target=TargetTriggeringNode())],
+            ),
+            Event(
+                label="deploy",
+                trigger=WaypointReceivedTrigger(),
+                exceptions=[EventException(kind="received_waypoint_too_far", meters=100)],
+                responses=[AddFlagResponse(flag_label="deployed", target=TargetTriggeringNode())],
+            ),
+        ],
+    )
+    eng = make_engine(cfg, db)
+    db.update_node_location(NODE_ID, *INSIDE_ZONE)
+
+    # In-range drop: deploy fires, warn does not
+    eng.handle_waypoint_received(_make_wp_ctx_at(47.0035, -122.003))
+    assert db.has_flag("node", NODE_ID, "deployed")
+    assert not db.has_flag("node", NODE_ID, "warned")
+
+    db.remove_flag("node", NODE_ID, "deployed")
+
+    # Out-of-range drop: warn fires, deploy does not
+    eng.handle_waypoint_received(_make_wp_ctx_at(47.016, -122.003))
+    assert not db.has_flag("node", NODE_ID, "deployed")
+    assert db.has_flag("node", NODE_ID, "warned")
+
+
+# ---------------------------------------------------------------------------
+# position_received trigger
+# ---------------------------------------------------------------------------
+
+def test_position_received_fires_event(db):
+    from config import PositionReceivedTrigger
+    cfg = minimal_config(
+        events=[
+            Event(
+                label="on_pos",
+                trigger=PositionReceivedTrigger(),
+                responses=[AddFlagResponse(flag_label="active", target=TargetTriggeringNode())],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db)
+    eng.handle_position(NODE_ID, *INSIDE_ZONE)
+    assert db.has_flag("node", NODE_ID, "active")
+
+
+def test_position_received_trigger_per_node_cooldown(db):
+    from config import PositionReceivedTrigger
+    cfg = minimal_config(
+        events=[
+            Event(
+                label="on_pos",
+                trigger=PositionReceivedTrigger(),
+                trigger_per_node=True,
+                reset_mins=60,
+                responses=[AddFlagResponse(flag_label="active", target=TargetTriggeringNode())],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db)
+    eng.handle_position(NODE_ID, *INSIDE_ZONE)
+    assert db.has_flag("node", NODE_ID, "active")
+    db.remove_flag("node", NODE_ID, "active")
+
+    # Second position within cooldown — should NOT re-fire
+    eng.handle_position(NODE_ID, *OUTSIDE_ZONE)
+    assert not db.has_flag("node", NODE_ID, "active")
+
+
+def test_position_received_does_not_fire_for_waypoint_context(db):
+    from config import PositionReceivedTrigger, WaypointReceivedTrigger
+    cfg = minimal_config(
+        events=[
+            Event(
+                label="on_pos",
+                trigger=PositionReceivedTrigger(),
+                responses=[AddFlagResponse(flag_label="pos_fired", target=TargetTriggeringNode())],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db)
+    # Waypoint packet should NOT fire the position_received event
+    eng.handle_waypoint_received(_make_wp_ctx())
+    assert not db.has_flag("node", NODE_ID, "pos_fired")
+
+
+# ---------------------------------------------------------------------------
+# distance_since_last_fix variable
+# ---------------------------------------------------------------------------
+
+def test_distance_since_last_fix_unknown_on_first_fix(db):
+    from config import PositionReceivedTrigger, Variable
+    var = Variable(label="move_delta", scope="node", tracks="distance_since_last_fix")
+    cfg = minimal_config(
+        variables=[var],
+        messages=[Message(label="m", text="{move_delta}")],
+        events=[
+            Event(
+                label="on_pos",
+                trigger=PositionReceivedTrigger(),
+                responses=[SendMessageResponse(message_label="m", target=TargetTriggeringNode())],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db)
+    eng.handle_position(NODE_ID, *INSIDE_ZONE)
+    assert len(eng.sent_dms) == 1
+    assert eng.sent_dms[0][1] == "[unknown]"
+
+
+def test_distance_since_last_fix_computes_on_second_fix(db):
+    from config import PositionReceivedTrigger, Variable
+    var = Variable(label="move_delta", scope="node", tracks="distance_since_last_fix")
+    cfg = minimal_config(
+        variables=[var],
+        messages=[Message(label="m", text="{move_delta}")],
+        events=[
+            Event(
+                label="on_pos",
+                trigger=PositionReceivedTrigger(),
+                responses=[SendMessageResponse(message_label="m", target=TargetTriggeringNode())],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db)
+    # First fix — seeds prev location
+    eng.handle_position(NODE_ID, 47.0, -122.0)
+    # Second fix — ~111 m north (1 arc-second ≈ 31 m; 0.001 deg ≈ 111 m)
+    eng.handle_position(NODE_ID, 47.001, -122.0)
+    assert len(eng.sent_dms) == 2
+    delta = float(eng.sent_dms[1][1])
+    assert 100 < delta < 130   # ~111 m, allow GPS jitter tolerance
+
+
+# ---------------------------------------------------------------------------
+# variable_amount on increment_variable
+# ---------------------------------------------------------------------------
+
+def test_variable_amount_increments_by_resolved_value(db):
+    from config import PositionReceivedTrigger, Variable
+    var = Variable(label="move_delta", scope="node", tracks="distance_since_last_fix")
+    mv = MutableVariableDef(label="meters_moved", type="float", scope="node", initial=0.0)
+    cfg = minimal_config(
+        variables=[var],
+        mutable_variables=[mv],
+        events=[
+            Event(
+                label="on_pos",
+                trigger=PositionReceivedTrigger(),
+                responses=[
+                    IncrementVariableResponse(
+                        variable_label="meters_moved",
+                        variable_amount="move_delta",
+                        target=TargetTriggeringNode(),
+                    )
+                ],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db)
+    eng.handle_position(NODE_ID, 47.0, -122.0)     # first fix: [unknown] → skipped
+    eng.handle_position(NODE_ID, 47.001, -122.0)   # second fix: accumulates ~111 m
+    val = db.get_mutable_variable("meters_moved", NODE_ID)
+    assert val is not None and float(val) > 50
+
+
+def test_variable_amount_skipped_on_unknown(db):
+    from config import PositionReceivedTrigger, Variable
+    var = Variable(label="move_delta", scope="node", tracks="distance_since_last_fix")
+    mv = MutableVariableDef(label="meters_moved", type="float", scope="node", initial=0.0)
+    cfg = minimal_config(
+        variables=[var],
+        mutable_variables=[mv],
+        events=[
+            Event(
+                label="on_pos",
+                trigger=PositionReceivedTrigger(),
+                responses=[
+                    IncrementVariableResponse(
+                        variable_label="meters_moved",
+                        variable_amount="move_delta",
+                        target=TargetTriggeringNode(),
+                    )
+                ],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db)
+    eng.handle_position(NODE_ID, *INSIDE_ZONE)  # first fix — [unknown], should skip silently
+    val = db.get_mutable_variable("meters_moved", NODE_ID)
+    # Either no row yet (None) or initial value 0
+    assert val is None or float(val) == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Interpolation tokens: {date}, {time}, {waypoint_icon}
+# ---------------------------------------------------------------------------
+
+def test_waypoint_icon_token_interpolated(db):
+    from config import WaypointReceivedTrigger
+    cfg = minimal_config(
+        messages=[Message(label="m", text="icon={waypoint_icon}")],
+        events=[
+            Event(
+                label="on_wp",
+                trigger=WaypointReceivedTrigger(),
+                responses=[SendMessageResponse(message_label="m", target=TargetTriggeringNode())],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db)
+    eng.handle_waypoint_received(_make_wp_ctx(icon=42))
+    assert len(eng.sent_dms) == 1
+    assert eng.sent_dms[0][1] == "icon=42"
+
+
+def test_date_and_time_tokens_interpolated(db):
+    import re
+    from config import WaypointReceivedTrigger
+    cfg = minimal_config(
+        messages=[Message(label="m", text="d={date} t={time}")],
+        events=[
+            Event(
+                label="on_wp",
+                trigger=WaypointReceivedTrigger(),
+                responses=[SendMessageResponse(message_label="m", target=TargetTriggeringNode())],
+            )
+        ],
+    )
+    eng = make_engine(cfg, db)
+    eng.handle_waypoint_received(_make_wp_ctx())
+    assert len(eng.sent_dms) == 1
+    text = eng.sent_dms[0][1]
+    assert re.search(r"d=\d{4}-\d{2}-\d{2}", text), f"date token not found in {text!r}"
+    assert re.search(r"t=\d{2}:\d{2}", text), f"time token not found in {text!r}"
